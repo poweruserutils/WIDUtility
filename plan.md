@@ -320,3 +320,26 @@ WID utility/
 
 Planning only. **No code written yet.** Awaiting further direction from user
 before starting implementation.
+
+## TODO — next session (2026-05-09+)
+
+- **Build still fails after the RegLoadKey stale-load fix landed in
+  c19a885.** Reproduce, then read the latest
+  `Desktop\WID Utility Logs\WID-*.log` to identify which stage breaks now.
+  Likely candidates to investigate first:
+  1. A second tweak failing after UAC succeeds (e.g. sethc swap, LabConfig
+     on the SYSTEM hive — that hive uses a different subkey name, which
+     should be fine, but verify).
+  2. WIM commit/unmount failing because something inside the mounted tree
+     is held open (a stray file handle on the SOFTWARE hive after
+     `OfflineHive` destruction).
+  3. `Export-Image` (trim stage) failing on a too-large WIM.
+  4. `oscdimg` failing because boot files are not where we expect on
+     non-multi-arch ISOs.
+- After that's green, wire the Components and Features panels to populate
+  from the mounted WIM (currently they are still empty placeholders).
+- Build the `WIDRebootHelper.exe` companion (double-confirm dialog +
+  `BootNext` picker) and stage it during the pipeline so the
+  reboot-to-UEFI / reboot-to-boot-device Start menu shortcuts work.
+- App download manager: today the pipeline only stages installers when
+  the user supplies a local path; URL fetching is a no-op.
