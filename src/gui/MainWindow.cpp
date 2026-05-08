@@ -83,7 +83,7 @@ LRESULT CALLBACK panelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_COMMAND:
     case WM_NOTIFY:
-        return SendMessageW(GetParent(h), m, w, l);
+        return SendMessageW(GetAncestor(h, GA_ROOT), m, w, l);
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORBTN: {
