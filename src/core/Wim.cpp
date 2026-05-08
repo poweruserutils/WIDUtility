@@ -92,7 +92,7 @@ std::vector<WimEdition> getWimInfo(const fs::path& wimFile, const ProgressFn& pr
 }
 
 std::vector<WimEdition> inspectIso(const fs::path& iso, const ProgressFn& progress) {
-    std::vector<WimEdition> empty;
+    auto& log = util::Log::instance();
     SetEnvironmentVariableW(L"WID_ISO", iso.c_str());
 
     util::ProcessOptions mount;
@@ -100,37 +100,62 @@ std::vector<WimEdition> inspectIso(const fs::path& iso, const ProgressFn& progre
     mount.args = {
         L"-NoProfile", L"-NonInteractive", L"-ExecutionPolicy", L"Bypass",
         L"-Command",
-        L"$ErrorActionPreference='Stop';"
-        L"$img = Mount-DiskImage -ImagePath $env:WID_ISO -PassThru;"
-        L"Start-Sleep -Milliseconds 750;"
-        L"$drive = ($img | Get-Volume).DriveLetter;"
+        L"$ErrorActionPreference='SilentlyContinue';"
+        L"$path = $env:WID_ISO;"
+        L"$existing = Get-DiskImage -ImagePath $path;"
+        L"if ($existing -and $existing.Attached) {"
+        L"  $drive = ($existing | Get-Volume).DriveLetter"
+        L"} else {"
+        L"  $img = Mount-DiskImage -ImagePath $path -PassThru;"
+        L"  Start-Sleep -Milliseconds 1500;"
+        L"  $drive = ($img | Get-DiskImage | Get-Volume).DriveLetter"
+        L"};"
         L"Write-Output ('DRIVE=' + $drive)"
     };
     auto mr = util::run(mount);
-    if (!mr.finished || mr.exitCode != 0) {
-        SetEnvironmentVariableW(L"WID_ISO", nullptr);
-        return empty;
-    }
+    log.debug(L"inspectIso mount stdout: " + mr.stdoutText, L"inspectIso");
+    if (!mr.stderrText.empty())
+        log.warn(L"inspectIso mount stderr: " + mr.stderrText, L"inspectIso");
 
     std::wstring drive;
     auto pos = mr.stdoutText.find(L"DRIVE=");
-    if (pos != std::wstring::npos && pos + 6 < mr.stdoutText.size()) {
-        wchar_t c = mr.stdoutText[pos + 6];
-        if (iswalpha(c)) drive = std::wstring(1, c);
+    if (pos != std::wstring::npos) {
+        for (size_t i = pos + 6; i < mr.stdoutText.size(); ++i) {
+            wchar_t c = mr.stdoutText[i];
+            if (c == L'\r' || c == L'\n') break;
+            if (iswalpha(c)) { drive = std::wstring(1, c); break; }
+        }
     }
+    log.info(L"inspectIso resolved drive letter: '" + drive + L"'",
+             L"inspectIso");
 
     std::vector<WimEdition> editions;
     if (!drive.empty()) {
-        fs::path wim = drive + L":\\sources\\install.wim";
+        const wchar_t* candidates[] = {
+            L":\\sources\\install.wim",
+            L":\\sources\\install.esd",
+            L":\\x64\\sources\\install.wim",
+            L":\\x64\\sources\\install.esd",
+            L":\\x86\\sources\\install.wim",
+            L":\\x86\\sources\\install.esd",
+        };
+        fs::path wim;
         std::error_code ec;
-        if (!fs::exists(wim, ec))
-            wim = drive + L":\\sources\\install.esd";
-        if (fs::exists(wim, ec))
+        for (auto* sub : candidates) {
+            fs::path p = drive + sub;
+            if (fs::exists(p, ec)) { wim = p; break; }
+        }
+        if (!wim.empty()) {
+            log.info(L"inspectIso reading: " + wim.wstring(), L"inspectIso");
             editions = getWimInfo(wim, progress);
-        else
-            util::Log::instance().warn(
-                L"No install.wim or install.esd found on the mounted ISO.",
-                L"inspectIso");
+        } else {
+            log.warn(L"inspectIso: no install.wim/.esd found under " + drive +
+                     L":\\ (tried sources, x64\\sources, x86\\sources)",
+                     L"inspectIso");
+        }
+    } else {
+        log.warn(L"inspectIso: could not determine mounted drive letter",
+                 L"inspectIso");
     }
 
     util::ProcessOptions dismount;

@@ -567,13 +567,13 @@ HWND MainWindow::createCommandsPanel(HWND parent) {
         kPad + 122, 180, 28, hFont_, ID_ADD_POST);
 
     mkLabel(p, L"Pre-logon (SYSTEM, before first logon):",
-        kPad, kPad + 168, 600, 22, hFontBold_);
+        kPad, kPad + 168, 820, 22, hFontBold_);
     hwndPreList_  = mkListBox(p, kPad, kPad + 192, 820, 130, hFont_, 0);
     hwndBtnDelPre_ = mkBtn(p, L"Remove selected", kPad,
         kPad + 328, 160, 26, hFont_, ID_DEL_PRE);
 
     mkLabel(p, L"Post-logon (after first user logon):",
-        kPad, kPad + 366, 600, 22, hFontBold_);
+        kPad, kPad + 366, 820, 22, hFontBold_);
     hwndPostList_  = mkListBox(p, kPad, kPad + 390, 820, 130, hFont_, 0);
     hwndBtnDelPost_ = mkBtn(p, L"Remove selected", kPad,
         kPad + 526, 160, 26, hFont_, ID_DEL_POST);
