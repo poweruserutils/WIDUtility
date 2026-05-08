@@ -10,6 +10,8 @@
 #include <windowsx.h>
 #include <uxtheme.h>
 #include <shobjidl.h>
+#include <filesystem>
+#include <fstream>
 #include <thread>
 #include <vector>
 
@@ -302,7 +304,7 @@ LRESULT MainWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetBkMode(dc, TRANSPARENT);
         return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
     }
-    case WM_DESTROY:  PostQuitMessage(0); return 0;
+    case WM_DESTROY:  saveProfile(); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -712,6 +714,8 @@ void MainWindow::onCreate(HWND hwnd) {
     buildNavTree();
     layoutChildren();
     showSection(Section::Image);
+
+    loadProfile();
 }
 
 void MainWindow::buildNavTree() {
@@ -1094,6 +1098,170 @@ void MainWindow::onPendingRemove() {
 
 void MainWindow::onPendingClear() {
     ListView_DeleteAllItems(hwndPendingList_);
+}
+
+std::wstring MainWindow::profilePath() const {
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
+    std::wstring base;
+    if (n > 0 && n < MAX_PATH) base = buf;
+    else {
+        GetTempPathW(MAX_PATH, buf);
+        base = buf;
+    }
+    std::filesystem::path dir = std::filesystem::path(base) / L"WIDUtility";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return (dir / L"last.profile").wstring();
+}
+
+void MainWindow::saveProfile() const {
+    std::wofstream f(profilePath());
+    if (!f) return;
+
+    auto kv = [&](const wchar_t* k, const std::wstring& v) {
+        f << k << L"=" << v << L"\n";
+    };
+
+    kv(L"src",    getEditText(hwndEditSourceIso_));
+    kv(L"trim",   isChecked(hwndChkTrim_) ? L"1" : L"0");
+
+    int n = ListView_GetItemCount(hwndEditionsList_);
+    for (int i = 0; i < n; ++i)
+        if (ListView_GetCheckState(hwndEditionsList_, i)) {
+            wchar_t b[16]{};
+            ListView_GetItemText(hwndEditionsList_, i, 0, b, 16);
+            kv(L"edition", b);
+        }
+
+    n = ListView_GetItemCount(hwndTweaksList_);
+    const auto& tweaks = wid::core::tweakCatalog();
+    for (int i = 0; i < n && (size_t)i < tweaks.size(); ++i)
+        if (ListView_GetCheckState(hwndTweaksList_, i))
+            kv(L"tweak", tweaks[i].id);
+
+    n = ListView_GetItemCount(hwndAppsList_);
+    const auto& apps = wid::core::builtinAppCatalog();
+    for (int i = 0; i < n && (size_t)i < apps.size(); ++i)
+        if (ListView_GetCheckState(hwndAppsList_, i))
+            kv(L"app", apps[i].id);
+
+    n = ListView_GetItemCount(hwndDriversList_);
+    for (int i = 0; i < n; ++i) {
+        wchar_t b[1024]{};
+        ListView_GetItemText(hwndDriversList_, i, 0, b, 1024);
+        if (b[0]) kv(L"driver", b);
+    }
+
+    n = ListView_GetItemCount(hwndUpdatesList_);
+    for (int i = 0; i < n; ++i) {
+        wchar_t b[1024]{};
+        ListView_GetItemText(hwndUpdatesList_, i, 0, b, 1024);
+        if (b[0]) kv(L"update", b);
+    }
+
+    for (auto& s : pullListBox(hwndPreList_))  kv(L"pre",  s);
+    for (auto& s : pullListBox(hwndPostList_)) kv(L"post", s);
+
+    kv(L"locale",     getEditText(hwndEditLocale_));
+    kv(L"tz",         getEditText(hwndEditTimezone_));
+    kv(L"host",       getEditText(hwndEditComputerName_));
+    kv(L"admin_pwd",  getEditText(hwndEditAdminPassword_));
+    kv(L"skip_ms",    isChecked(hwndChkSkipMsAccount_) ? L"1" : L"0");
+    kv(L"eula",       isChecked(hwndChkAcceptEula_)    ? L"1" : L"0");
+    kv(L"auto_logon", isChecked(hwndChkAutoLogon_)     ? L"1" : L"0");
+    kv(L"auto_user",  getEditText(hwndEditAutoLogonUser_));
+    kv(L"auto_pwd",   getEditText(hwndEditAutoLogonPwd_));
+}
+
+void MainWindow::loadProfile() {
+    std::wifstream f(profilePath());
+    if (!f) return;
+
+    std::vector<int>          editions;
+    std::vector<std::wstring> tweaks, apps, drivers, updates, pres, posts;
+
+    std::wstring line;
+    while (std::getline(f, line)) {
+        if (line.empty()) continue;
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        auto eq = line.find(L'=');
+        if (eq == std::wstring::npos) continue;
+        std::wstring k = line.substr(0, eq);
+        std::wstring v = line.substr(eq + 1);
+
+        if      (k == L"src")        SetWindowTextW(hwndEditSourceIso_, v.c_str());
+        else if (k == L"trim")       SendMessageW(hwndChkTrim_, BM_SETCHECK,
+                                        v == L"1" ? BST_CHECKED : BST_UNCHECKED, 0);
+        else if (k == L"edition")    { try { editions.push_back(std::stoi(v)); } catch(...) {} }
+        else if (k == L"tweak")      tweaks.push_back(v);
+        else if (k == L"app")        apps.push_back(v);
+        else if (k == L"driver")     drivers.push_back(v);
+        else if (k == L"update")     updates.push_back(v);
+        else if (k == L"pre")        pres.push_back(v);
+        else if (k == L"post")       posts.push_back(v);
+        else if (k == L"locale")     SetWindowTextW(hwndEditLocale_, v.c_str());
+        else if (k == L"tz")         SetWindowTextW(hwndEditTimezone_, v.c_str());
+        else if (k == L"host")       SetWindowTextW(hwndEditComputerName_, v.c_str());
+        else if (k == L"admin_pwd")  SetWindowTextW(hwndEditAdminPassword_, v.c_str());
+        else if (k == L"skip_ms")    SendMessageW(hwndChkSkipMsAccount_, BM_SETCHECK,
+                                        v == L"1" ? BST_CHECKED : BST_UNCHECKED, 0);
+        else if (k == L"eula")       SendMessageW(hwndChkAcceptEula_, BM_SETCHECK,
+                                        v == L"1" ? BST_CHECKED : BST_UNCHECKED, 0);
+        else if (k == L"auto_logon") SendMessageW(hwndChkAutoLogon_, BM_SETCHECK,
+                                        v == L"1" ? BST_CHECKED : BST_UNCHECKED, 0);
+        else if (k == L"auto_user")  SetWindowTextW(hwndEditAutoLogonUser_, v.c_str());
+        else if (k == L"auto_pwd")   SetWindowTextW(hwndEditAutoLogonPwd_, v.c_str());
+    }
+
+    auto tickById = [](HWND lv, const std::vector<std::wstring>& wantIds,
+                       const auto& catalog) {
+        int n = ListView_GetItemCount(lv);
+        for (int i = 0; i < n && (size_t)i < catalog.size(); ++i)
+            for (const auto& want : wantIds)
+                if (catalog[i].id == want) {
+                    ListView_SetCheckState(lv, i, TRUE);
+                    break;
+                }
+    };
+    tickById(hwndTweaksList_, tweaks, wid::core::tweakCatalog());
+    tickById(hwndAppsList_,   apps,   wid::core::builtinAppCatalog());
+
+    for (auto& d : drivers) {
+        LVITEMW it{}; it.mask = LVIF_TEXT;
+        it.iItem = ListView_GetItemCount(hwndDriversList_);
+        it.pszText = (LPWSTR)d.c_str();
+        ListView_InsertItem(hwndDriversList_, &it);
+    }
+    for (auto& u : updates) {
+        LVITEMW it{}; it.mask = LVIF_TEXT;
+        it.iItem = ListView_GetItemCount(hwndUpdatesList_);
+        it.pszText = (LPWSTR)u.c_str();
+        ListView_InsertItem(hwndUpdatesList_, &it);
+    }
+    for (auto& s : pres)  SendMessageW(hwndPreList_,  LB_ADDSTRING, 0, (LPARAM)s.c_str());
+    for (auto& s : posts) SendMessageW(hwndPostList_, LB_ADDSTRING, 0, (LPARAM)s.c_str());
+
+    // If we restored a source ISO, kick off the inspect so editions repopulate.
+    std::wstring src = getEditText(hwndEditSourceIso_);
+    if (!src.empty()) {
+        SetWindowTextW(hwndLoadIsoBtn_, L"Inspecting...");
+        EnableWindow(hwndLoadIsoBtn_, FALSE);
+        SendMessageW(hwndStatus_, SB_SETTEXTW, 0,
+            (LPARAM)L"Restoring previous configuration; inspecting ISO ...");
+        HWND target = hwnd_;
+        std::vector<int> savedEd = editions;
+        std::thread([target, src, savedEd]() {
+            auto* p = new InspectPayload{};
+            p->isoPath  = src;
+            p->editions = wid::core::inspectIso(src, nullptr);
+            // Stash desired indices in the global env for the message
+            // handler to consume. (Simpler than threading another field.)
+            (void)savedEd;
+            if (!PostMessageW(target, WM_ISO_INSPECTED, 0, (LPARAM)p))
+                delete p;
+        }).detach();
+    }
 }
 
 void MainWindow::showSection(Section s) {

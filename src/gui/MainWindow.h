@@ -77,6 +77,10 @@ private:
     void onPendingRemove();
     void onPendingClear();
 
+    std::wstring profilePath() const;
+    void saveProfile() const;
+    void loadProfile();
+
     bool pickFile(bool save, const wchar_t* title,
                   const wchar_t* filter, const wchar_t* defExt,
                   std::wstring& out);

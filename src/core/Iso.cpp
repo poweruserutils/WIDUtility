@@ -12,7 +12,9 @@ namespace {
 
 // Try to mount the ISO as a virtual disk via PowerShell's Mount-DiskImage,
 // xcopy contents to destDir, then dismount. PowerShell is universally
-// available on supported Windows versions.
+// available on supported Windows versions. /A-:R asks robocopy to strip
+// the read-only attribute that CDFS sets on every file, since DISM
+// refuses to mount install.wim R/W when the file is read-only.
 bool extractViaMount(const fs::path& iso, const fs::path& dest) {
     util::ProcessOptions ps;
     ps.executable = L"powershell.exe";
@@ -22,7 +24,8 @@ bool extractViaMount(const fs::path& iso, const fs::path& dest) {
         L"$ErrorActionPreference='Stop';"
         L"$img = Mount-DiskImage -ImagePath $env:WID_ISO -PassThru;"
         L"$drive = ($img | Get-Volume).DriveLetter + ':\\';"
-        L"robocopy $drive $env:WID_DEST /MIR /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null;"
+        L"robocopy $drive $env:WID_DEST /MIR /A-:RSH "
+            L"/NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null;"
         L"Dismount-DiskImage -ImagePath $env:WID_ISO | Out-Null;"
     };
 
@@ -37,6 +40,24 @@ bool extractViaMount(const fs::path& iso, const fs::path& dest) {
     return res.launched && res.finished && res.exitCode <= 7;
 }
 
+// Belt-and-braces: walk the extracted tree and clear the read-only +
+// hidden + system attributes from every file. Needed even with /A-:RSH
+// because some Windows builds of robocopy ignore -:H on certain files.
+void clearReadOnlyTree(const fs::path& root) {
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(
+             root, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        DWORD a = GetFileAttributesW(it->path().c_str());
+        if (a == INVALID_FILE_ATTRIBUTES) continue;
+        DWORD cleaned = a & ~(FILE_ATTRIBUTE_READONLY |
+                              FILE_ATTRIBUTE_HIDDEN   |
+                              FILE_ATTRIBUTE_SYSTEM);
+        if (cleaned != a)
+            SetFileAttributesW(it->path().c_str(), cleaned);
+    }
+}
+
 } // namespace
 
 bool extractIso(const IsoExtractOptions& opts, const ProgressFn& progress) {
@@ -48,6 +69,7 @@ bool extractIso(const IsoExtractOptions& opts, const ProgressFn& progress) {
     util::Log::instance().info(L"Extracting ISO: " + opts.sourceIso.wstring(),
                                L"Iso");
     bool ok = extractViaMount(opts.sourceIso, opts.destDir);
+    if (ok) clearReadOnlyTree(opts.destDir);
     if (progress) progress(L"Extracting ISO", 100);
     return ok;
 }
