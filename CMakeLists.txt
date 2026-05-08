@@ -14,6 +14,7 @@ add_executable(wid WIN32
     src/app.manifest
 
     src/gui/MainWindow.cpp
+    src/gui/ProgressWindow.cpp
 
     src/util/Log.cpp
     src/util/Process.cpp

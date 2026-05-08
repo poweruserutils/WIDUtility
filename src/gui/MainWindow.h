@@ -1,7 +1,10 @@
 #pragma once
 
+#include "gui/ProgressWindow.h"
+
 #include <windows.h>
 #include <commctrl.h>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
@@ -165,6 +168,8 @@ private:
     HWND hwndBtnBuildIso_    = nullptr;
 
     Section current_ = Section::Image;
+
+    std::unique_ptr<ProgressWindow> progress_;
 };
 
 } // namespace wid::gui

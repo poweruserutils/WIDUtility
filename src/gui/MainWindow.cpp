@@ -1,8 +1,11 @@
 #include "gui/MainWindow.h"
 
 #include "core/Apps.h"
+#include "core/PendingChange.h"
+#include "core/Pipeline.h"
 #include "core/Tweaks.h"
 #include "core/Wim.h"
+#include "util/Log.h"
 
 #include <windowsx.h>
 #include <uxtheme.h>
@@ -876,27 +879,160 @@ void MainWindow::onBrowseSourceIso() {
     }).detach();
 }
 
+namespace {
+
+std::wstring getEditText(HWND h) {
+    int n = GetWindowTextLengthW(h);
+    std::wstring s(n, L'\0');
+    if (n > 0) GetWindowTextW(h, s.data(), n + 1);
+    return s;
+}
+
+bool isChecked(HWND h) {
+    return SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+std::vector<std::wstring> pullListBox(HWND lb) {
+    std::vector<std::wstring> out;
+    int count = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
+    for (int i = 0; i < count; ++i) {
+        int len = (int)SendMessageW(lb, LB_GETTEXTLEN, i, 0);
+        std::wstring s(len, L'\0');
+        SendMessageW(lb, LB_GETTEXT, i, (LPARAM)s.data());
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+} // namespace
+
 void MainWindow::onBuildIso() {
-    wchar_t src[1024]{};
-    GetWindowTextW(hwndEditSourceIso_, src, (int)std::size(src));
-    if (!src[0]) {
-        MessageBoxW(hwnd_,
-            L"Pick a source ISO on the Image page first.",
-            L"WID Utility", MB_ICONINFORMATION);
+    std::wstring src = getEditText(hwndEditSourceIso_);
+    if (src.empty()) {
+        MessageBoxW(hwnd_, L"Pick a source ISO on the Image page first.",
+                    L"WID Utility", MB_ICONINFORMATION);
         return;
     }
     std::wstring out;
     if (!pickFile(true, L"Save built ISO as", L"*.iso", L"iso", out)) return;
 
-    std::wstring s;
-    s  = L"Source ISO: "; s += src; s += L"\r\n";
-    s += L"Output ISO: "; s += out; s += L"\r\n\r\n";
-    s += L"Pipeline integration is not yet wired up. The 11-stage build "
-         L"(extract, mount, edits, DISM, scripts, commit, trim, oscdimg, "
-         L"verify) will run here once the apply path is connected.";
-    SetWindowTextW(hwndApplySummary_, s.c_str());
-    SendMessageW(hwndStatus_, SB_SETTEXTW, 0,
-                 (LPARAM)L"Build requested (pipeline not yet wired)");
+    wid::core::PipelineInputs inputs;
+    inputs.sourceIso      = src;
+    inputs.outputIso      = out;
+    inputs.trimUnselected = isChecked(hwndChkTrim_);
+
+    int n = ListView_GetItemCount(hwndEditionsList_);
+    for (int i = 0; i < n; ++i) {
+        if (ListView_GetCheckState(hwndEditionsList_, i)) {
+            wchar_t buf[16]{};
+            ListView_GetItemText(hwndEditionsList_, i, 0, buf, 16);
+            int idx = _wtoi(buf);
+            if (idx > 0) inputs.keepEditionIndices.push_back(idx);
+        }
+    }
+
+    const auto& tweaks = wid::core::tweakCatalog();
+    n = ListView_GetItemCount(hwndTweaksList_);
+    for (int i = 0; i < n && (size_t)i < tweaks.size(); ++i) {
+        if (!ListView_GetCheckState(hwndTweaksList_, i)) continue;
+        wid::core::PendingChange c;
+        c.kind        = wid::core::ChangeKind::Tweak;
+        c.action      = wid::core::ChangeAction::Add;
+        c.targetId    = tweaks[i].id;
+        c.description = L"Tweak: " + tweaks[i].displayName;
+        inputs.changes.push_back(c);
+    }
+
+    const auto& apps = wid::core::builtinAppCatalog();
+    n = ListView_GetItemCount(hwndAppsList_);
+    for (int i = 0; i < n && (size_t)i < apps.size(); ++i) {
+        if (!ListView_GetCheckState(hwndAppsList_, i)) continue;
+        wid::core::PendingChange c;
+        c.kind        = wid::core::ChangeKind::Application;
+        c.action      = wid::core::ChangeAction::Add;
+        c.targetId    = apps[i].id;
+        c.description = L"App: " + apps[i].displayName;
+        c.payload     = apps[i].localPath;
+        inputs.changes.push_back(c);
+    }
+
+    n = ListView_GetItemCount(hwndDriversList_);
+    for (int i = 0; i < n; ++i) {
+        wchar_t path[1024]{};
+        ListView_GetItemText(hwndDriversList_, i, 0, path, 1024);
+        if (!path[0]) continue;
+        wid::core::PendingChange c;
+        c.kind        = wid::core::ChangeKind::Driver;
+        c.action      = wid::core::ChangeAction::Add;
+        c.targetId    = std::filesystem::path(path).filename().wstring();
+        c.payload     = path;
+        c.description = L"Driver: " + c.targetId;
+        inputs.changes.push_back(c);
+    }
+
+    n = ListView_GetItemCount(hwndUpdatesList_);
+    for (int i = 0; i < n; ++i) {
+        wchar_t path[1024]{};
+        ListView_GetItemText(hwndUpdatesList_, i, 0, path, 1024);
+        if (!path[0]) continue;
+        wid::core::PendingChange c;
+        c.kind        = wid::core::ChangeKind::Update;
+        c.action      = wid::core::ChangeAction::Add;
+        c.targetId    = std::filesystem::path(path).filename().wstring();
+        c.payload     = path;
+        c.description = L"Update: " + c.targetId;
+        inputs.changes.push_back(c);
+    }
+
+    for (auto& cmd : pullListBox(hwndPreList_)) {
+        inputs.commands.add(wid::core::CommandPhase::PreLogon,
+                            { L"", cmd, false });
+    }
+    for (auto& cmd : pullListBox(hwndPostList_)) {
+        inputs.commands.add(wid::core::CommandPhase::PostLogon,
+                            { L"", cmd, false });
+        inputs.unattend.firstLogonCommands.push_back({ L"", cmd, false });
+    }
+
+    inputs.unattend.locale          = getEditText(hwndEditLocale_);
+    inputs.unattend.timezone        = getEditText(hwndEditTimezone_);
+    inputs.unattend.computerName    = getEditText(hwndEditComputerName_);
+    inputs.unattend.adminPassword   = getEditText(hwndEditAdminPassword_);
+    inputs.unattend.skipMicrosoftAccount = isChecked(hwndChkSkipMsAccount_);
+    inputs.unattend.acceptEula           = isChecked(hwndChkAcceptEula_);
+    inputs.unattend.autoLogon            = isChecked(hwndChkAutoLogon_);
+    inputs.unattend.autoLogonUser        = getEditText(hwndEditAutoLogonUser_);
+    inputs.unattend.autoLogonPassword    = getEditText(hwndEditAutoLogonPwd_);
+
+    progress_ = std::make_unique<ProgressWindow>(hwnd_);
+    if (!progress_->create()) {
+        MessageBoxW(hwnd_, L"Failed to open progress window.",
+                    L"WID Utility", MB_ICONERROR);
+        progress_.reset();
+        return;
+    }
+    ProgressWindow* pw = progress_.get();
+
+    // Pipe log records to the progress window for the duration of the build.
+    auto sinkId = std::make_shared<int>(0);
+    wid::util::Log::instance().addSink(
+        [pw](const wid::util::LogRecord& r) {
+            std::wstring line;
+            if (!r.source.empty()) line += r.source + L": ";
+            line += r.message;
+            pw->postLogLine(line);
+        });
+
+    std::thread([pw, inputs = std::move(inputs)]() mutable {
+        wid::core::Pipeline pipe(std::move(inputs));
+        bool ok = pipe.run([pw, &pipe](const wid::core::StageReport& r) {
+            pw->postProgress(r.overallPercent, r.label);
+            if (pw->cancelFlag().load()) pipe.cancel();
+        });
+        pw->postCompleted(ok,
+            ok ? L"Build completed successfully."
+               : L"Build failed. See WIDUtility.log for details.");
+    }).detach();
 }
 
 void MainWindow::onAddDriver() {
