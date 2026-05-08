@@ -193,47 +193,47 @@ HWND MainWindow::createImagePanel(HWND parent) {
         L"Choose a Windows installation ISO to use as the source, "
         L"and a path for the customized ISO that will be built.",
         WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 28, 700, 36,
+        kPad, kPad + 32, 820, 64,
         panel, nullptr, hInstance_, nullptr);
     SendMessageW(lblHelp, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
     HWND lblSrc = CreateWindowExW(0, L"STATIC", L"Source ISO:",
         WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 80, 100, 22,
+        kPad, kPad + 122, 100, 22,
         panel, nullptr, hInstance_, nullptr);
     SendMessageW(lblSrc, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
     hwndEditSourceIso_ = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        kPad + 110, kPad + 78, 500, 24,
+        kPad + 110, kPad + 120, 500, 24,
         panel, (HMENU)(INT_PTR)ID_EDIT_SRC, hInstance_, nullptr);
     SendMessageW(hwndEditSourceIso_, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
     hwndBtnBrowseSrc_ = CreateWindowExW(
         0, L"BUTTON", L"Browse...",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        kPad + 620, kPad + 78, 100, 26,
+        kPad + 620, kPad + 120, 100, 26,
         panel, (HMENU)(INT_PTR)ID_BROWSE_SRC, hInstance_, nullptr);
     SendMessageW(hwndBtnBrowseSrc_, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
     HWND lblDst = CreateWindowExW(0, L"STATIC", L"Output ISO:",
         WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 120, 100, 22,
+        kPad, kPad + 162, 100, 22,
         panel, nullptr, hInstance_, nullptr);
     SendMessageW(lblDst, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
     hwndEditOutputIso_ = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        kPad + 110, kPad + 118, 500, 24,
+        kPad + 110, kPad + 160, 500, 24,
         panel, (HMENU)(INT_PTR)ID_EDIT_DST, hInstance_, nullptr);
     SendMessageW(hwndEditOutputIso_, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
     hwndBtnBrowseDst_ = CreateWindowExW(
         0, L"BUTTON", L"Browse...",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        kPad + 620, kPad + 118, 100, 26,
+        kPad + 620, kPad + 160, 100, 26,
         panel, (HMENU)(INT_PTR)ID_BROWSE_DST, hInstance_, nullptr);
     SendMessageW(hwndBtnBrowseDst_, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
@@ -241,7 +241,7 @@ HWND MainWindow::createImagePanel(HWND parent) {
         L"Workflow: ISO in, ISO out. The source ISO is never modified; "
         L"all edits are applied to a working copy that becomes the output ISO.",
         WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 170, 700, 40,
+        kPad, kPad + 210, 820, 80,
         panel, nullptr, hInstance_, nullptr);
     SendMessageW(lblNote, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
