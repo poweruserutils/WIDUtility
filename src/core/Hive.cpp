@@ -47,12 +47,36 @@ bool OfflineHive::enableHivePrivileges() {
 OfflineHive::OfflineHive(const fs::path& hiveFile, const std::wstring& subkey)
     : hiveFile_(hiveFile), subkey_(subkey) {
     enableHivePrivileges();
+
+    auto& log = util::Log::instance();
+    std::error_code ec;
+    if (!fs::exists(hiveFile_, ec)) {
+        log.error(L"Hive file does not exist: " + hiveFile_.wstring(), L"Hive");
+        return;
+    }
+
+    // Make sure the hive file is writable; DISM occasionally leaves
+    // FILE_ATTRIBUTE_READONLY on hive files inside a mounted WIM and
+    // RegLoadKey then fails with ERROR_INVALID_PARAMETER (87).
+    DWORD attrs = GetFileAttributesW(hiveFile_.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & FILE_ATTRIBUTE_READONLY)) {
+        SetFileAttributesW(hiveFile_.c_str(),
+                           attrs & ~FILE_ATTRIBUTE_READONLY);
+    }
+
+    // Defensive: a previous crashed build may have left the subkey
+    // registered. Try to unload any stale registration first.
+    RegUnLoadKeyW(HKEY_LOCAL_MACHINE, subkey_.c_str());
+
     LONG r = RegLoadKeyW(HKEY_LOCAL_MACHINE, subkey_.c_str(),
                          hiveFile_.c_str());
     if (r != ERROR_SUCCESS) {
-        util::Log::instance().error(
-            L"RegLoadKey failed for " + hiveFile_.wstring() +
-            L" (error " + std::to_wstring(r) + L")", L"Hive");
+        auto sz = fs::file_size(hiveFile_, ec);
+        log.error(L"RegLoadKey failed for " + hiveFile_.wstring() +
+                  L" (error " + std::to_wstring(r) +
+                  L", size=" + std::to_wstring(sz) +
+                  L", attrs=" + std::to_wstring(attrs) + L")", L"Hive");
         return;
     }
     loaded_ = true;
