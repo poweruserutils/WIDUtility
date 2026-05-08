@@ -56,9 +56,23 @@ std::vector<WimEdition> getWimInfo(const fs::path& wimFile, const ProgressFn& pr
                 L"/WimFile:" + wimFile.wstring() };
     po.timeoutMs = 60000;
     auto res = util::run(po);
+    util::Log::instance().debug(
+        L"getWimInfo exit=" + std::to_wstring(res.exitCode) +
+        L" stdout bytes=" + std::to_wstring(res.stdoutText.size()),
+        L"Wim");
     if (!res.launched || !res.finished || res.exitCode != 0) return editions;
 
-    // Parse blocks separated by blank lines.
+    auto trimBoth = [](std::wstring& s){
+        while (!s.empty() && (s.back() == L'\r' || s.back() == L'\n' ||
+                              s.back() == L' '  || s.back() == L'\t'))
+            s.pop_back();
+        size_t i = 0;
+        while (i < s.size() && (s[i] == L' ' || s[i] == L'\t')) ++i;
+        s.erase(0, i);
+    };
+
+    // DISM emits "Key : Value" with spaces around the colon. Trim both
+    // sides so "Index " matches "Index", etc.
     std::wistringstream ss(res.stdoutText);
     std::wstring line;
     WimEdition cur;
@@ -67,26 +81,26 @@ std::vector<WimEdition> getWimInfo(const fs::path& wimFile, const ProgressFn& pr
         cur = WimEdition{};
     };
     while (std::getline(ss, line)) {
-        auto trim = [](std::wstring& s){
-            while (!s.empty() && (s.back() == L'\r' || s.back() == L' ')) s.pop_back();
-        };
-        trim(line);
+        trimBoth(line);
         if (line.empty()) { flush(); continue; }
         auto colon = line.find(L':');
         if (colon == std::wstring::npos) continue;
         std::wstring key = line.substr(0, colon);
         std::wstring val = line.substr(colon + 1);
-        while (!val.empty() && val.front() == L' ') val.erase(val.begin());
+        trimBoth(key);
+        trimBoth(val);
 
-        if      (key == L"Index")        cur.index = std::stoi(val);
-        else if (key == L"Name")         cur.name = val;
-        else if (key == L"Description")  cur.description = val;
-        else if (key == L"Architecture") cur.architecture = val;
-        else if (key == L"Size")         {
-            std::wstring digits;
-            for (wchar_t c : val) if (iswdigit(c)) digits.push_back(c);
-            if (!digits.empty()) cur.sizeBytes = std::stoull(digits);
-        }
+        try {
+            if      (key == L"Index")        cur.index = std::stoi(val);
+            else if (key == L"Name")         cur.name = val;
+            else if (key == L"Description")  cur.description = val;
+            else if (key == L"Architecture") cur.architecture = val;
+            else if (key == L"Size") {
+                std::wstring digits;
+                for (wchar_t c : val) if (iswdigit(c)) digits.push_back(c);
+                if (!digits.empty()) cur.sizeBytes = std::stoull(digits);
+            }
+        } catch (...) { /* skip malformed line */ }
     }
     flush();
 
