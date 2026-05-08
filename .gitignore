@@ -1,0 +1,43 @@
+# Build output
+/build/
+/out/
+/x64/
+/Debug/
+/Release/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+CTestTestfile.cmake
+_deps/
+
+# MSVC / Visual Studio
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+*.dll
+*.idb
+*.tlog
+*.log
+*.suo
+*.user
+*.aps
+*.opensdf
+*.sdf
+*.vcxproj.filters
+.vs/
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
