@@ -5,6 +5,8 @@
 #include "util/Process.h"
 
 #include <windows.h>
+#include <initguid.h>
+#include <virtdisk.h>
 #include <regex>
 #include <sstream>
 
@@ -92,47 +94,95 @@ std::vector<WimEdition> getWimInfo(const fs::path& wimFile, const ProgressFn& pr
     return editions;
 }
 
-std::vector<WimEdition> inspectIso(const fs::path& iso, const ProgressFn& progress) {
-    auto& log = util::Log::instance();
-    SetEnvironmentVariableW(L"WID_ISO", iso.c_str());
+namespace {
 
-    util::ProcessOptions mount;
-    mount.executable = L"powershell.exe";
-    mount.args = {
-        L"-NoProfile", L"-NonInteractive", L"-ExecutionPolicy", L"Bypass",
-        L"-Command",
-        L"$ErrorActionPreference='SilentlyContinue';"
-        L"$path = $env:WID_ISO;"
-        L"$existing = Get-DiskImage -ImagePath $path;"
-        L"if ($existing -and $existing.Attached) {"
-        L"  $drive = ($existing | Get-Volume).DriveLetter"
-        L"} else {"
-        L"  $img = Mount-DiskImage -ImagePath $path -PassThru;"
-        L"  Start-Sleep -Milliseconds 1500;"
-        L"  $drive = ($img | Get-DiskImage | Get-Volume).DriveLetter"
-        L"};"
-        L"Write-Output ('DRIVE=' + $drive)"
-    };
-    mount.timeoutMs = 60000;
-    auto mr = util::run(mount);
-    log.debug(L"inspectIso mount stdout: " + mr.stdoutText, L"inspectIso");
-    if (!mr.stderrText.empty())
-        log.warn(L"inspectIso mount stderr: " + mr.stderrText, L"inspectIso");
-
-    std::wstring drive;
-    auto pos = mr.stdoutText.find(L"DRIVE=");
-    if (pos != std::wstring::npos) {
-        for (size_t i = pos + 6; i < mr.stdoutText.size(); ++i) {
-            wchar_t c = mr.stdoutText[i];
-            if (c == L'\r' || c == L'\n') break;
-            if (iswalpha(c)) { drive = std::wstring(1, c); break; }
+wchar_t findIsoDriveByContent() {
+    // Scan all logical drives for one whose root looks like a Windows
+    // installation media tree. Used as a fallback when AttachVirtualDisk
+    // didn't give us a drive letter (e.g. ISO was already attached).
+    DWORD mask = GetLogicalDrives();
+    for (int b = 0; b < 26; ++b) {
+        if (!(mask & (1u << b))) continue;
+        wchar_t d = (wchar_t)(L'A' + b);
+        wchar_t root[8] = { d, L':', L'\\', 0 };
+        UINT t = GetDriveTypeW(root);
+        if (t != DRIVE_CDROM && t != DRIVE_REMOVABLE && t != DRIVE_FIXED)
+            continue;
+        std::error_code ec;
+        std::wstring base = std::wstring(1, d) + L":";
+        if (fs::exists(fs::path(base + L"\\sources\\install.wim"), ec) ||
+            fs::exists(fs::path(base + L"\\sources\\install.esd"), ec)) {
+            return d;
         }
     }
-    log.info(L"inspectIso resolved drive letter: '" + drive + L"'",
-             L"inspectIso");
+    return 0;
+}
+
+wchar_t newlyAppearedDrive(DWORD before) {
+    DWORD now = GetLogicalDrives();
+    DWORD diff = now & ~before;
+    if (!diff) return 0;
+    for (int b = 0; b < 26; ++b)
+        if (diff & (1u << b)) return (wchar_t)(L'A' + b);
+    return 0;
+}
+
+} // namespace
+
+std::vector<WimEdition> inspectIso(const fs::path& iso, const ProgressFn& progress) {
+    auto& log = util::Log::instance();
+    log.info(L"inspectIso start: " + iso.wstring(), L"inspectIso");
+
+    DWORD before = GetLogicalDrives();
+
+    VIRTUAL_STORAGE_TYPE vst{};
+    vst.DeviceId = VIRTUAL_STORAGE_TYPE_DEVICE_ISO;
+    vst.VendorId = VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT;
+
+    HANDLE handle  = INVALID_HANDLE_VALUE;
+    bool   weOwnAttach = false;
+
+    DWORD r = OpenVirtualDisk(&vst, iso.c_str(),
+        (VIRTUAL_DISK_ACCESS_MASK)(VIRTUAL_DISK_ACCESS_READ |
+                                   VIRTUAL_DISK_ACCESS_GET_INFO),
+        OPEN_VIRTUAL_DISK_FLAG_NONE, nullptr, &handle);
+    if (r != ERROR_SUCCESS) {
+        log.warn(L"OpenVirtualDisk failed (" + std::to_wstring(r) + L")",
+                 L"inspectIso");
+    } else {
+        ATTACH_VIRTUAL_DISK_PARAMETERS avdp{};
+        avdp.Version = ATTACH_VIRTUAL_DISK_VERSION_1;
+        DWORD ar = AttachVirtualDisk(handle, nullptr,
+            (ATTACH_VIRTUAL_DISK_FLAG)(ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY),
+            0, &avdp, nullptr);
+        if (ar == ERROR_SUCCESS) {
+            weOwnAttach = true;
+            log.info(L"AttachVirtualDisk succeeded", L"inspectIso");
+        } else {
+            log.warn(L"AttachVirtualDisk returned " + std::to_wstring(ar) +
+                     L" (likely already attached)", L"inspectIso");
+        }
+    }
+
+    wchar_t driveLetter = 0;
+    for (int i = 0; i < 60 && !driveLetter; ++i) {
+        Sleep(100);
+        driveLetter = newlyAppearedDrive(before);
+    }
+
+    if (!driveLetter) {
+        driveLetter = findIsoDriveByContent();
+        if (driveLetter)
+            log.info(std::wstring(L"Located ISO content on drive ") +
+                     driveLetter + L": (fallback scan)", L"inspectIso");
+    } else {
+        log.info(std::wstring(L"New drive letter from attach: ") +
+                 driveLetter + L":", L"inspectIso");
+    }
 
     std::vector<WimEdition> editions;
-    if (!drive.empty()) {
+    if (driveLetter) {
+        std::wstring d(1, driveLetter);
         const wchar_t* candidates[] = {
             L":\\sources\\install.wim",
             L":\\sources\\install.esd",
@@ -144,33 +194,28 @@ std::vector<WimEdition> inspectIso(const fs::path& iso, const ProgressFn& progre
         fs::path wim;
         std::error_code ec;
         for (auto* sub : candidates) {
-            fs::path p = drive + sub;
+            fs::path p = d + sub;
             if (fs::exists(p, ec)) { wim = p; break; }
         }
         if (!wim.empty()) {
-            log.info(L"inspectIso reading: " + wim.wstring(), L"inspectIso");
+            log.info(L"Reading WIM: " + wim.wstring(), L"inspectIso");
             editions = getWimInfo(wim, progress);
         } else {
-            log.warn(L"inspectIso: no install.wim/.esd found under " + drive +
-                     L":\\ (tried sources, x64\\sources, x86\\sources)",
-                     L"inspectIso");
+            log.warn(L"No install.wim/.esd found on drive " + d, L"inspectIso");
         }
     } else {
-        log.warn(L"inspectIso: could not determine mounted drive letter",
-                 L"inspectIso");
+        log.error(L"Could not locate the ISO drive letter (attach failed and "
+                  L"no matching drive present).", L"inspectIso");
     }
 
-    util::ProcessOptions dismount;
-    dismount.executable = L"powershell.exe";
-    dismount.args = {
-        L"-NoProfile", L"-NonInteractive", L"-ExecutionPolicy", L"Bypass",
-        L"-Command",
-        L"Dismount-DiskImage -ImagePath $env:WID_ISO | Out-Null"
-    };
-    dismount.timeoutMs = 60000;
-    util::run(dismount);
-    SetEnvironmentVariableW(L"WID_ISO", nullptr);
+    if (handle != INVALID_HANDLE_VALUE) {
+        if (weOwnAttach)
+            DetachVirtualDisk(handle, DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
+        CloseHandle(handle);
+    }
 
+    log.info(L"inspectIso done: " + std::to_wstring(editions.size()) +
+             L" edition(s)", L"inspectIso");
     return editions;
 }
 

@@ -54,6 +54,7 @@ target_link_libraries(wid PRIVATE
     shell32
     ole32
     uxtheme
+    virtdisk
 )
 
 set_target_properties(wid PROPERTIES
