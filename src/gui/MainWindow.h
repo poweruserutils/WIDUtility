@@ -51,14 +51,14 @@ private:
     // Per-section panels
     HWND createImagePanel(HWND parent);
     HWND createTweaksPanel(HWND parent);
+    HWND createApplyPanel(HWND parent);
     HWND createPlaceholderPanel(HWND parent, const wchar_t* title, const wchar_t* body);
     void populateTweaks();
 
     // Browse helpers
     void onBrowseSourceIso();
-    void onBrowseOutputIso();
-    bool pickFile(bool save, const wchar_t* title,
-                  const wchar_t* filter, std::wstring& out);
+    void onBuildIso();
+    bool pickFile(bool save, const wchar_t* title, std::wstring& out);
 
     HINSTANCE hInstance_;
     HFONT     hFont_       = nullptr;
@@ -76,14 +76,17 @@ private:
     // Image panel
     HWND hwndPanelImage_     = nullptr;
     HWND hwndEditSourceIso_  = nullptr;
-    HWND hwndEditOutputIso_  = nullptr;
     HWND hwndBtnBrowseSrc_   = nullptr;
-    HWND hwndBtnBrowseDst_   = nullptr;
 
     // Tweaks panel
     HWND hwndPanelTweaks_    = nullptr;
     HWND hwndTweaksList_     = nullptr;
     HWND hwndTweaksDesc_     = nullptr;
+
+    // Apply panel
+    HWND hwndPanelApply_     = nullptr;
+    HWND hwndApplySummary_   = nullptr;
+    HWND hwndBtnBuildIso_    = nullptr;
 
     // Placeholder panels per section
     std::unordered_map<int, HWND> placeholders_;

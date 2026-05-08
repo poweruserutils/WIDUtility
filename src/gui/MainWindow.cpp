@@ -12,6 +12,7 @@ namespace wid::gui {
 namespace {
 
 constexpr wchar_t kClassName[]   = L"WIDUtility.MainWindow";
+constexpr wchar_t kPanelClass[]  = L"WIDUtility.Panel";
 constexpr wchar_t kWindowTitle[] = L"WID Utility";
 
 constexpr int kHeaderHeight = 64;
@@ -24,10 +25,9 @@ constexpr WORD ID_DETAIL       = 1002;
 constexpr WORD ID_STATUS       = 1003;
 constexpr WORD ID_LOAD_ISO     = 2001;
 constexpr WORD ID_BROWSE_SRC   = 2010;
-constexpr WORD ID_BROWSE_DST   = 2011;
 constexpr WORD ID_EDIT_SRC     = 2012;
-constexpr WORD ID_EDIT_DST     = 2013;
 constexpr WORD ID_TWEAKS_LIST  = 2020;
+constexpr WORD ID_BUILD_ISO    = 2030;
 
 struct NavEntry { Section section; const wchar_t* label; };
 
@@ -76,6 +76,30 @@ void setFontRecursive(HWND hwnd, HFONT font) {
     }
 }
 
+// Panel class proc: forwards WM_COMMAND / WM_NOTIFY to the parent
+// (the main window), and paints a window-colored background so child
+// controls blend with it.
+LRESULT CALLBACK panelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_COMMAND:
+    case WM_NOTIFY:
+        return SendMessageW(GetParent(h), m, w, l);
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORBTN: {
+        HDC dc = (HDC)w;
+        SetBkMode(dc, TRANSPARENT);
+        return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
+    }
+    case WM_ERASEBKGND: {
+        RECT rc; GetClientRect(h, &rc);
+        FillRect((HDC)w, &rc, GetSysColorBrush(COLOR_WINDOW));
+        return 1;
+    }
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
 } // namespace
 
 MainWindow::MainWindow(HINSTANCE hInstance) : hInstance_(hInstance) {}
@@ -105,6 +129,15 @@ bool MainWindow::create() {
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = kClassName;
     if (!RegisterClassExW(&wc)) return false;
+
+    WNDCLASSEXW pwc{};
+    pwc.cbSize        = sizeof(pwc);
+    pwc.lpfnWndProc   = panelProc;
+    pwc.hInstance     = hInstance_;
+    pwc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+    pwc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    pwc.lpszClassName = kPanelClass;
+    RegisterClassExW(&pwc);
 
     hwnd_ = CreateWindowExW(
         0, kClassName, kWindowTitle, WS_OVERLAPPEDWINDOW,
@@ -180,8 +213,7 @@ void MainWindow::createHeader(HWND parent) {
 
 HWND MainWindow::createImagePanel(HWND parent) {
     HWND panel = CreateWindowExW(
-        0, L"STATIC", L"",
-        WS_CHILD | SS_WHITERECT,
+        0, kPanelClass, L"", WS_CHILD,
         0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
 
     HWND lblTitle = CreateWindowExW(0, L"STATIC", L"Image",
@@ -190,8 +222,8 @@ HWND MainWindow::createImagePanel(HWND parent) {
     SendMessageW(lblTitle, WM_SETFONT, (WPARAM)hFontBold_, TRUE);
 
     HWND lblHelp = CreateWindowExW(0, L"STATIC",
-        L"Choose a Windows installation ISO to use as the source, "
-        L"and a path for the customized ISO that will be built.",
+        L"Pick the Windows installation ISO you want to customize. "
+        L"You will choose the destination for the built ISO later, on the Apply page.",
         WS_CHILD | WS_VISIBLE,
         kPad, kPad + 32, 820, 64,
         panel, nullptr, hInstance_, nullptr);
@@ -217,40 +249,55 @@ HWND MainWindow::createImagePanel(HWND parent) {
         panel, (HMENU)(INT_PTR)ID_BROWSE_SRC, hInstance_, nullptr);
     SendMessageW(hwndBtnBrowseSrc_, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
-    HWND lblDst = CreateWindowExW(0, L"STATIC", L"Output ISO:",
-        WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 162, 100, 22,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblDst, WM_SETFONT, (WPARAM)hFont_, TRUE);
-
-    hwndEditOutputIso_ = CreateWindowExW(
-        WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        kPad + 110, kPad + 160, 500, 24,
-        panel, (HMENU)(INT_PTR)ID_EDIT_DST, hInstance_, nullptr);
-    SendMessageW(hwndEditOutputIso_, WM_SETFONT, (WPARAM)hFont_, TRUE);
-
-    hwndBtnBrowseDst_ = CreateWindowExW(
-        0, L"BUTTON", L"Browse...",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        kPad + 620, kPad + 160, 100, 26,
-        panel, (HMENU)(INT_PTR)ID_BROWSE_DST, hInstance_, nullptr);
-    SendMessageW(hwndBtnBrowseDst_, WM_SETFONT, (WPARAM)hFont_, TRUE);
-
     HWND lblNote = CreateWindowExW(0, L"STATIC",
-        L"Workflow: ISO in, ISO out. The source ISO is never modified; "
-        L"all edits are applied to a working copy that becomes the output ISO.",
+        L"The source ISO is never modified. All edits are applied to a "
+        L"working copy, which becomes the new ISO when you click "
+        L"Build ISO on the Apply page.",
         WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 210, 820, 80,
+        kPad, kPad + 170, 820, 80,
         panel, nullptr, hInstance_, nullptr);
     SendMessageW(lblNote, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
     return panel;
 }
 
+HWND MainWindow::createApplyPanel(HWND parent) {
+    HWND panel = CreateWindowExW(
+        0, kPanelClass, L"", WS_CHILD,
+        0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+
+    HWND lblTitle = CreateWindowExW(0, L"STATIC", L"Apply",
+        WS_CHILD | WS_VISIBLE, kPad, kPad, 400, 24,
+        panel, nullptr, hInstance_, nullptr);
+    SendMessageW(lblTitle, WM_SETFONT, (WPARAM)hFontBold_, TRUE);
+
+    HWND lblHelp = CreateWindowExW(0, L"STATIC",
+        L"Build the customized ISO. You will be asked where to save it.",
+        WS_CHILD | WS_VISIBLE,
+        kPad, kPad + 32, 820, 24,
+        panel, nullptr, hInstance_, nullptr);
+    SendMessageW(lblHelp, WM_SETFONT, (WPARAM)hFont_, TRUE);
+
+    hwndApplySummary_ = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
+        kPad, kPad + 70, 820, 220,
+        panel, nullptr, hInstance_, nullptr);
+    SendMessageW(hwndApplySummary_, WM_SETFONT, (WPARAM)hFont_, TRUE);
+
+    hwndBtnBuildIso_ = CreateWindowExW(
+        0, L"BUTTON", L"Build ISO...",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+        kPad, kPad + 310, 180, 36,
+        panel, (HMENU)(INT_PTR)ID_BUILD_ISO, hInstance_, nullptr);
+    SendMessageW(hwndBtnBuildIso_, WM_SETFONT, (WPARAM)hFontBold_, TRUE);
+
+    return panel;
+}
+
 HWND MainWindow::createTweaksPanel(HWND parent) {
     HWND panel = CreateWindowExW(
-        0, L"STATIC", L"", WS_CHILD | SS_WHITERECT,
+        0, kPanelClass, L"", WS_CHILD,
         0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
 
     HWND lblTitle = CreateWindowExW(0, L"STATIC", L"Tweaks",
@@ -317,8 +364,8 @@ void MainWindow::populateTweaks() {
 }
 
 HWND MainWindow::createPlaceholderPanel(HWND parent, const wchar_t* title, const wchar_t* body) {
-    HWND panel = CreateWindowExW(0, L"STATIC", L"",
-        WS_CHILD | SS_WHITERECT, 0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+    HWND panel = CreateWindowExW(0, kPanelClass, L"",
+        WS_CHILD, 0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
 
     HWND lblTitle = CreateWindowExW(0, L"STATIC", title,
         WS_CHILD | WS_VISIBLE, kPad, kPad, 600, 24,
@@ -362,6 +409,7 @@ void MainWindow::onCreate(HWND hwnd) {
     // Build all panels up front; show the active one on selection.
     hwndPanelImage_  = createImagePanel(hwndDetail_);
     hwndPanelTweaks_ = createTweaksPanel(hwndDetail_);
+    hwndPanelApply_  = createApplyPanel(hwndDetail_);
 
     auto mkPlaceholder = [&](Section s, const wchar_t* title, const wchar_t* body) {
         placeholders_[(int)s] = createPlaceholderPanel(hwndDetail_, title, body);
@@ -394,11 +442,6 @@ void MainWindow::onCreate(HWND hwnd) {
         L"Every edit you make is queued here. Review, reorder, or remove "
         L"items before clicking Apply. The queue can be saved and re-loaded "
         L"as a build profile.");
-    mkPlaceholder(Section::Apply, L"Apply",
-        L"Final review and build. Runs the 11-stage pipeline: extract, "
-        L"inspect, mount, registry, DISM, stage installers, write scripts, "
-        L"commit, trim, oscdimg, verify.");
-
     buildNavTree();
     layoutChildren();
     showSection(Section::Image);
@@ -453,6 +496,7 @@ void MainWindow::layoutChildren() {
     auto fit = [&](HWND h) { if (h) MoveWindow(h, 0, 0, dr.right, dr.bottom, TRUE); };
     fit(hwndPanelImage_);
     fit(hwndPanelTweaks_);
+    fit(hwndPanelApply_);
     for (auto& kv : placeholders_) fit(kv.second);
 }
 
@@ -476,12 +520,11 @@ void MainWindow::onCommand(WORD id, HWND /*ctrl*/) {
     switch (id) {
     case ID_LOAD_ISO:
     case ID_BROWSE_SRC: onBrowseSourceIso(); break;
-    case ID_BROWSE_DST: onBrowseOutputIso(); break;
+    case ID_BUILD_ISO:  onBuildIso();        break;
     }
 }
 
-bool MainWindow::pickFile(bool save, const wchar_t* title,
-                          const wchar_t* /*filter*/, std::wstring& out) {
+bool MainWindow::pickFile(bool save, const wchar_t* title, std::wstring& out) {
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     bool needUninit = SUCCEEDED(hr);
 
@@ -517,19 +560,36 @@ bool MainWindow::pickFile(bool save, const wchar_t* title,
 
 void MainWindow::onBrowseSourceIso() {
     std::wstring path;
-    if (pickFile(false, L"Select source Windows ISO", nullptr, path)) {
+    if (pickFile(false, L"Select source Windows ISO", path)) {
         SetWindowTextW(hwndEditSourceIso_, path.c_str());
         showSection(Section::Image);
         SendMessageW(hwndStatus_, SB_SETTEXTW, 0, (LPARAM)L"Source ISO selected");
     }
 }
 
-void MainWindow::onBrowseOutputIso() {
-    std::wstring path;
-    if (pickFile(true, L"Choose output ISO path", nullptr, path)) {
-        SetWindowTextW(hwndEditOutputIso_, path.c_str());
-        SendMessageW(hwndStatus_, SB_SETTEXTW, 0, (LPARAM)L"Output ISO path set");
+void MainWindow::onBuildIso() {
+    wchar_t src[1024]{};
+    GetWindowTextW(hwndEditSourceIso_, src, (int)std::size(src));
+    if (!src[0]) {
+        MessageBoxW(hwnd_,
+            L"Pick a source ISO on the Image page first.",
+            L"WID Utility", MB_ICONINFORMATION);
+        return;
     }
+
+    std::wstring out;
+    if (!pickFile(true, L"Save built ISO as", out)) return;
+
+    std::wstring summary;
+    summary  = L"Source ISO: "; summary += src; summary += L"\r\n";
+    summary += L"Output ISO: "; summary += out; summary += L"\r\n\r\n";
+    summary += L"Pipeline integration is not yet wired up. The 11-stage "
+               L"build (extract, mount, edits, DISM, scripts, commit, "
+               L"trim, oscdimg, verify) will run here once the apply path "
+               L"is connected.";
+    SetWindowTextW(hwndApplySummary_, summary.c_str());
+    SendMessageW(hwndStatus_, SB_SETTEXTW, 0,
+                 (LPARAM)L"Build requested (pipeline not yet wired)");
 }
 
 void MainWindow::showSection(Section s) {
@@ -538,12 +598,14 @@ void MainWindow::showSection(Section s) {
     auto hide = [](HWND h) { if (h) ShowWindow(h, SW_HIDE); };
     hide(hwndPanelImage_);
     hide(hwndPanelTweaks_);
+    hide(hwndPanelApply_);
     for (auto& kv : placeholders_) hide(kv.second);
 
     HWND target = nullptr;
     switch (s) {
     case Section::Image:  target = hwndPanelImage_;  break;
     case Section::Tweaks: target = hwndPanelTweaks_; break;
+    case Section::Apply:  target = hwndPanelApply_;  break;
     default: {
         auto it = placeholders_.find((int)s);
         if (it != placeholders_.end()) target = it->second;
