@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 
+#include "core/Apps.h"
 #include "core/Tweaks.h"
 
 #include <windowsx.h>
@@ -19,15 +20,25 @@ constexpr int kHeaderHeight = 64;
 constexpr int kNavWidth     = 220;
 constexpr int kPad          = 16;
 
-// Control IDs
-constexpr WORD ID_NAV          = 1001;
-constexpr WORD ID_DETAIL       = 1002;
-constexpr WORD ID_STATUS       = 1003;
-constexpr WORD ID_LOAD_ISO     = 2001;
-constexpr WORD ID_BROWSE_SRC   = 2010;
-constexpr WORD ID_EDIT_SRC     = 2012;
-constexpr WORD ID_TWEAKS_LIST  = 2020;
-constexpr WORD ID_BUILD_ISO    = 2030;
+constexpr WORD ID_NAV               = 1001;
+constexpr WORD ID_DETAIL            = 1002;
+constexpr WORD ID_STATUS            = 1003;
+constexpr WORD ID_LOAD_ISO          = 2001;
+constexpr WORD ID_BROWSE_SRC        = 2010;
+constexpr WORD ID_EDIT_SRC          = 2012;
+constexpr WORD ID_TWEAKS_LIST       = 2020;
+constexpr WORD ID_APPS_LIST         = 2021;
+constexpr WORD ID_BUILD_ISO         = 2030;
+constexpr WORD ID_ADD_DRIVER        = 2040;
+constexpr WORD ID_DEL_DRIVER        = 2041;
+constexpr WORD ID_ADD_UPDATE        = 2050;
+constexpr WORD ID_DEL_UPDATE        = 2051;
+constexpr WORD ID_ADD_PRE           = 2060;
+constexpr WORD ID_ADD_POST          = 2061;
+constexpr WORD ID_DEL_PRE           = 2062;
+constexpr WORD ID_DEL_POST          = 2063;
+constexpr WORD ID_PENDING_DEL       = 2070;
+constexpr WORD ID_PENDING_CLEAR     = 2071;
 
 struct NavEntry { Section section; const wchar_t* label; };
 
@@ -59,26 +70,14 @@ HFONT makeFont(int pt, bool bold = false) {
     int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
     ReleaseDC(nullptr, hdc);
     LOGFONTW lf{};
-    lf.lfHeight = -MulDiv(pt, dpi, 72);
-    lf.lfWeight = bold ? FW_SEMIBOLD : FW_NORMAL;
+    lf.lfHeight  = -MulDiv(pt, dpi, 72);
+    lf.lfWeight  = bold ? FW_SEMIBOLD : FW_NORMAL;
     lf.lfQuality = CLEARTYPE_QUALITY;
     lf.lfCharSet = DEFAULT_CHARSET;
     wcscpy_s(lf.lfFaceName, L"Segoe UI");
     return CreateFontIndirectW(&lf);
 }
 
-void setFontRecursive(HWND hwnd, HFONT font) {
-    SendMessageW(hwnd, WM_SETFONT, (WPARAM)font, TRUE);
-    HWND child = GetWindow(hwnd, GW_CHILD);
-    while (child) {
-        setFontRecursive(child, font);
-        child = GetWindow(child, GW_HWNDNEXT);
-    }
-}
-
-// Panel class proc: forwards WM_COMMAND / WM_NOTIFY to the parent
-// (the main window), and paints a window-colored background so child
-// controls blend with it.
 LRESULT CALLBACK panelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_COMMAND:
@@ -86,11 +85,9 @@ LRESULT CALLBACK panelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return SendMessageW(GetAncestor(h, GA_ROOT), m, w, l);
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT:
-    case WM_CTLCOLORBTN: {
-        HDC dc = (HDC)w;
-        SetBkMode(dc, TRANSPARENT);
+    case WM_CTLCOLORBTN:
+        SetBkMode((HDC)w, TRANSPARENT);
         return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
-    }
     case WM_ERASEBKGND: {
         RECT rc; GetClientRect(h, &rc);
         FillRect((HDC)w, &rc, GetSysColorBrush(COLOR_WINDOW));
@@ -98,6 +95,74 @@ LRESULT CALLBACK panelProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     }
     return DefWindowProcW(h, m, w, l);
+}
+
+// ---- small UI builders ----
+
+HWND mkLabel(HWND p, const wchar_t* text, int x, int y, int w, int h, HFONT f) {
+    HWND r = CreateWindowExW(0, L"STATIC", text,
+        WS_CHILD | WS_VISIBLE, x, y, w, h, p, nullptr,
+        (HINSTANCE)GetWindowLongPtrW(p, GWLP_HINSTANCE), nullptr);
+    SendMessageW(r, WM_SETFONT, (WPARAM)f, TRUE);
+    return r;
+}
+
+HWND mkEdit(HWND p, const wchar_t* text, int x, int y, int w, int h,
+            HFONT f, WORD id, DWORD extra = 0) {
+    HWND r = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", text,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | extra,
+        x, y, w, h, p, (HMENU)(INT_PTR)id,
+        (HINSTANCE)GetWindowLongPtrW(p, GWLP_HINSTANCE), nullptr);
+    SendMessageW(r, WM_SETFONT, (WPARAM)f, TRUE);
+    return r;
+}
+
+HWND mkBtn(HWND p, const wchar_t* text, int x, int y, int w, int h,
+           HFONT f, WORD id, DWORD style = BS_PUSHBUTTON) {
+    HWND r = CreateWindowExW(0, L"BUTTON", text,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
+        x, y, w, h, p, (HMENU)(INT_PTR)id,
+        (HINSTANCE)GetWindowLongPtrW(p, GWLP_HINSTANCE), nullptr);
+    SendMessageW(r, WM_SETFONT, (WPARAM)f, TRUE);
+    return r;
+}
+
+HWND mkChk(HWND p, const wchar_t* text, int x, int y, int w, int h,
+           HFONT f, WORD id, bool initial = false) {
+    HWND r = mkBtn(p, text, x, y, w, h, f, id, BS_AUTOCHECKBOX);
+    SendMessageW(r, BM_SETCHECK, initial ? BST_CHECKED : BST_UNCHECKED, 0);
+    return r;
+}
+
+HWND mkLV(HWND p, int x, int y, int w, int h, HFONT f, WORD id, DWORD exStyle) {
+    HWND r = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+            LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
+        x, y, w, h, p, (HMENU)(INT_PTR)id,
+        (HINSTANCE)GetWindowLongPtrW(p, GWLP_HINSTANCE), nullptr);
+    ListView_SetExtendedListViewStyle(r,
+        exStyle | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    SetWindowTheme(r, L"Explorer", nullptr);
+    SendMessageW(r, WM_SETFONT, (WPARAM)f, TRUE);
+    return r;
+}
+
+void addCol(HWND lv, int idx, int w, const wchar_t* text) {
+    LVCOLUMNW c{};
+    c.mask = LVCF_TEXT | LVCF_WIDTH;
+    c.cx = w;
+    c.pszText = (LPWSTR)text;
+    ListView_InsertColumn(lv, idx, &c);
+}
+
+HWND mkListBox(HWND p, int x, int y, int w, int h, HFONT f, WORD id) {
+    HWND r = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+            LBS_NOTIFY | LBS_HASSTRINGS,
+        x, y, w, h, p, (HMENU)(INT_PTR)id,
+        (HINSTANCE)GetWindowLongPtrW(p, GWLP_HINSTANCE), nullptr);
+    SendMessageW(r, WM_SETFONT, (WPARAM)f, TRUE);
+    return r;
 }
 
 } // namespace
@@ -190,160 +255,177 @@ LRESULT MainWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 void MainWindow::createHeader(HWND parent) {
-    hwndHeader_ = CreateWindowExW(
-        0, L"STATIC", L"",
+    hwndHeader_ = CreateWindowExW(0, L"STATIC", L"",
         WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-        0, 0, 0, kHeaderHeight,
-        parent, nullptr, hInstance_, nullptr);
+        0, 0, 0, kHeaderHeight, parent, nullptr, hInstance_, nullptr);
 
-    hwndHeaderTitle_ = CreateWindowExW(
-        0, L"STATIC", L"Windows ISO Creator",
-        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE | SS_NOPREFIX,
-        kPad, 12, 800, 40,
-        parent, nullptr, hInstance_, nullptr);
-    SendMessageW(hwndHeaderTitle_, WM_SETFONT, (WPARAM)hFontTitle_, TRUE);
+    hwndHeaderTitle_ = mkLabel(parent, L"Windows ISO Creator",
+        kPad, 12, 800, 40, hFontTitle_);
 
-    hwndLoadIsoBtn_ = CreateWindowExW(
-        0, L"BUTTON", L"Load ISO...",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        0, 14, 120, 28,
-        parent, (HMENU)(INT_PTR)ID_LOAD_ISO, hInstance_, nullptr);
-    SendMessageW(hwndLoadIsoBtn_, WM_SETFONT, (WPARAM)hFont_, TRUE);
+    hwndLoadIsoBtn_ = mkBtn(parent, L"Load ISO...",
+        0, 18, 140, 30, hFont_, ID_LOAD_ISO);
 }
+
+// ----- panels -----
 
 HWND MainWindow::createImagePanel(HWND parent) {
-    HWND panel = CreateWindowExW(
-        0, kPanelClass, L"", WS_CHILD,
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
         0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
 
-    HWND lblTitle = CreateWindowExW(0, L"STATIC", L"Image",
-        WS_CHILD | WS_VISIBLE, kPad, kPad, 400, 24,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblTitle, WM_SETFONT, (WPARAM)hFontBold_, TRUE);
-
-    HWND lblHelp = CreateWindowExW(0, L"STATIC",
+    mkLabel(p, L"Image", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
         L"Pick the Windows installation ISO you want to customize. "
-        L"You will choose the destination for the built ISO later, on the Apply page.",
-        WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 32, 820, 64,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblHelp, WM_SETFONT, (WPARAM)hFont_, TRUE);
+        L"You will choose the destination for the built ISO later, on "
+        L"the Apply page.",
+        kPad, kPad + 32, 820, 60, hFont_);
 
-    HWND lblSrc = CreateWindowExW(0, L"STATIC", L"Source ISO:",
-        WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 122, 100, 22,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblSrc, WM_SETFONT, (WPARAM)hFont_, TRUE);
+    mkLabel(p, L"Source ISO:", kPad, kPad + 122, 100, 22, hFont_);
+    hwndEditSourceIso_ = mkEdit(p, L"", kPad + 110, kPad + 120, 500, 24,
+        hFont_, ID_EDIT_SRC);
+    hwndBtnBrowseSrc_ = mkBtn(p, L"Browse...", kPad + 620, kPad + 120,
+        100, 26, hFont_, ID_BROWSE_SRC);
 
-    hwndEditSourceIso_ = CreateWindowExW(
-        WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-        kPad + 110, kPad + 120, 500, 24,
-        panel, (HMENU)(INT_PTR)ID_EDIT_SRC, hInstance_, nullptr);
-    SendMessageW(hwndEditSourceIso_, WM_SETFONT, (WPARAM)hFont_, TRUE);
-
-    hwndBtnBrowseSrc_ = CreateWindowExW(
-        0, L"BUTTON", L"Browse...",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-        kPad + 620, kPad + 120, 100, 26,
-        panel, (HMENU)(INT_PTR)ID_BROWSE_SRC, hInstance_, nullptr);
-    SendMessageW(hwndBtnBrowseSrc_, WM_SETFONT, (WPARAM)hFont_, TRUE);
-
-    HWND lblNote = CreateWindowExW(0, L"STATIC",
+    mkLabel(p,
         L"The source ISO is never modified. All edits are applied to a "
-        L"working copy, which becomes the new ISO when you click "
-        L"Build ISO on the Apply page.",
-        WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 170, 820, 80,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblNote, WM_SETFONT, (WPARAM)hFont_, TRUE);
+        L"working copy, which becomes the new ISO when you click Build "
+        L"ISO on the Apply page.",
+        kPad, kPad + 170, 820, 60, hFont_);
 
-    return panel;
+    return p;
 }
 
-HWND MainWindow::createApplyPanel(HWND parent) {
-    HWND panel = CreateWindowExW(
-        0, kPanelClass, L"", WS_CHILD,
+HWND MainWindow::createEditionsPanel(HWND parent) {
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
         0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
 
-    HWND lblTitle = CreateWindowExW(0, L"STATIC", L"Apply",
-        WS_CHILD | WS_VISIBLE, kPad, kPad, 400, 24,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblTitle, WM_SETFONT, (WPARAM)hFontBold_, TRUE);
+    mkLabel(p, L"Editions", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
+        L"Each row is a Windows edition inside install.wim (Pro, Home, "
+        L"Education, etc.). Tick the editions to keep. The list is "
+        L"populated after the source ISO is loaded and inspected.",
+        kPad, kPad + 32, 820, 50, hFont_);
 
-    HWND lblHelp = CreateWindowExW(0, L"STATIC",
-        L"Build the customized ISO. You will be asked where to save it.",
-        WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 32, 820, 24,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblHelp, WM_SETFONT, (WPARAM)hFont_, TRUE);
+    hwndEditionsList_ = mkLV(p, kPad, kPad + 92, 820, 380,
+        hFont_, 0, LVS_EX_CHECKBOXES);
+    addCol(hwndEditionsList_, 0,  60, L"Index");
+    addCol(hwndEditionsList_, 1, 320, L"Name");
+    addCol(hwndEditionsList_, 2, 110, L"Architecture");
+    addCol(hwndEditionsList_, 3, 120, L"Size");
+    addCol(hwndEditionsList_, 4, 200, L"Description");
 
-    hwndApplySummary_ = CreateWindowExW(
-        WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
-        kPad, kPad + 70, 820, 220,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(hwndApplySummary_, WM_SETFONT, (WPARAM)hFont_, TRUE);
+    hwndChkTrim_ = mkChk(p,
+        L"Trim unselected editions from the output ISO (recommended)",
+        kPad, kPad + 484, 600, 22, hFont_, 0, true);
 
-    hwndBtnBuildIso_ = CreateWindowExW(
-        0, L"BUTTON", L"Build ISO...",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-        kPad, kPad + 310, 180, 36,
-        panel, (HMENU)(INT_PTR)ID_BUILD_ISO, hInstance_, nullptr);
-    SendMessageW(hwndBtnBuildIso_, WM_SETFONT, (WPARAM)hFontBold_, TRUE);
+    return p;
+}
 
-    return panel;
+HWND MainWindow::createComponentsPanel(HWND parent) {
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
+        0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+
+    mkLabel(p, L"Components", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
+        L"Provisioned AppX packages and inbox apps. Tick to remove from "
+        L"the image. Populated from DISM /Get-ProvisionedAppxPackages "
+        L"after the ISO is mounted.",
+        kPad, kPad + 32, 820, 50, hFont_);
+
+    hwndComponentsList_ = mkLV(p, kPad, kPad + 92, 820, 480,
+        hFont_, 0, LVS_EX_CHECKBOXES);
+    addCol(hwndComponentsList_, 0, 360, L"Display Name");
+    addCol(hwndComponentsList_, 1, 440, L"Package Name");
+
+    return p;
+}
+
+HWND MainWindow::createFeaturesPanel(HWND parent) {
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
+        0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+
+    mkLabel(p, L"Features", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
+        L"Optional Windows features (DISM /Get-Features). Tick to "
+        L"enable; clear to disable. Populated after the ISO is mounted.",
+        kPad, kPad + 32, 820, 50, hFont_);
+
+    hwndFeaturesList_ = mkLV(p, kPad, kPad + 92, 820, 480,
+        hFont_, 0, LVS_EX_CHECKBOXES);
+    addCol(hwndFeaturesList_, 0, 480, L"Feature Name");
+    addCol(hwndFeaturesList_, 1, 320, L"State");
+
+    return p;
+}
+
+HWND MainWindow::createApplicationsPanel(HWND parent) {
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
+        0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+
+    mkLabel(p, L"Applications", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
+        L"Third-party apps to silent-install during setup. Selected "
+        L"apps are staged into the image and installed by SetupComplete.cmd "
+        L"before the first user logon.",
+        kPad, kPad + 32, 820, 50, hFont_);
+
+    hwndAppsList_ = mkLV(p, kPad, kPad + 92, 820, 360,
+        hFont_, ID_APPS_LIST, LVS_EX_CHECKBOXES);
+    addCol(hwndAppsList_, 0, 220, L"Application");
+    addCol(hwndAppsList_, 1, 180, L"Vendor");
+    addCol(hwndAppsList_, 2, 220, L"ID");
+    addCol(hwndAppsList_, 3, 200, L"Silent Args");
+
+    hwndAppsDesc_ = mkEdit(p,
+        L"Select an app to see its installer details. Antigravity, "
+        L"Windsurf, Cursor, and Claude do not yet have public download "
+        L"URLs in the catalog and will need a local installer path.",
+        kPad, kPad + 462, 820, 100,
+        hFont_, 0, ES_MULTILINE | ES_READONLY | WS_VSCROLL);
+
+    populateApps();
+    return p;
+}
+
+void MainWindow::populateApps() {
+    const auto& cat = wid::core::builtinAppCatalog();
+    for (size_t i = 0; i < cat.size(); ++i) {
+        const auto& a = cat[i];
+        LVITEMW it{};
+        it.mask = LVIF_TEXT | LVIF_PARAM;
+        it.iItem = (int)i;
+        it.lParam = (LPARAM)i;
+        it.pszText = (LPWSTR)a.displayName.c_str();
+        ListView_InsertItem(hwndAppsList_, &it);
+        ListView_SetItemText(hwndAppsList_, (int)i, 1, (LPWSTR)a.vendor.c_str());
+        ListView_SetItemText(hwndAppsList_, (int)i, 2, (LPWSTR)a.id.c_str());
+        ListView_SetItemText(hwndAppsList_, (int)i, 3, (LPWSTR)a.silentArgs.c_str());
+    }
 }
 
 HWND MainWindow::createTweaksPanel(HWND parent) {
-    HWND panel = CreateWindowExW(
-        0, kPanelClass, L"", WS_CHILD,
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
         0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
 
-    HWND lblTitle = CreateWindowExW(0, L"STATIC", L"Tweaks",
-        WS_CHILD | WS_VISIBLE, kPad, kPad, 400, 24,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblTitle, WM_SETFONT, (WPARAM)hFontBold_, TRUE);
-
-    HWND lblHelp = CreateWindowExW(0, L"STATIC",
+    mkLabel(p, L"Tweaks", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
         L"Toggle individual tweaks. Each enabled tweak becomes a "
         L"pending change applied to the ISO during the build.",
-        WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 28, 700, 36,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblHelp, WM_SETFONT, (WPARAM)hFont_, TRUE);
+        kPad, kPad + 32, 820, 40, hFont_);
 
-    hwndTweaksList_ = CreateWindowExW(
-        WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP |
-            LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-        kPad, kPad + 76, 800, 380,
-        panel, (HMENU)(INT_PTR)ID_TWEAKS_LIST, hInstance_, nullptr);
-    ListView_SetExtendedListViewStyle(hwndTweaksList_,
-        LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-    SetWindowTheme(hwndTweaksList_, L"Explorer", nullptr);
-    SendMessageW(hwndTweaksList_, WM_SETFONT, (WPARAM)hFont_, TRUE);
+    hwndTweaksList_ = mkLV(p, kPad, kPad + 76, 820, 380,
+        hFont_, ID_TWEAKS_LIST, LVS_EX_CHECKBOXES);
+    addCol(hwndTweaksList_, 0, 380, L"Tweak");
+    addCol(hwndTweaksList_, 1, 110, L"Category");
+    addCol(hwndTweaksList_, 2, 80,  L"Risk");
+    addCol(hwndTweaksList_, 3, 220, L"Id");
 
-    LVCOLUMNW col{};
-    col.mask = LVCF_TEXT | LVCF_WIDTH;
-    col.cx = 380; col.pszText = (LPWSTR)L"Tweak";
-    ListView_InsertColumn(hwndTweaksList_, 0, &col);
-    col.cx = 110; col.pszText = (LPWSTR)L"Category";
-    ListView_InsertColumn(hwndTweaksList_, 1, &col);
-    col.cx = 80;  col.pszText = (LPWSTR)L"Risk";
-    ListView_InsertColumn(hwndTweaksList_, 2, &col);
-    col.cx = 220; col.pszText = (LPWSTR)L"Id";
-    ListView_InsertColumn(hwndTweaksList_, 3, &col);
-
-    hwndTweaksDesc_ = CreateWindowExW(
-        WS_EX_CLIENTEDGE, L"EDIT", L"Select a tweak to see its description.",
-        WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
-        kPad, kPad + 470, 800, 110,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(hwndTweaksDesc_, WM_SETFONT, (WPARAM)hFont_, TRUE);
+    hwndTweaksDesc_ = mkEdit(p,
+        L"Select a tweak to see its description.",
+        kPad, kPad + 470, 820, 110,
+        hFont_, 0, ES_MULTILINE | ES_READONLY | WS_VSCROLL);
 
     populateTweaks();
-    return panel;
+    return p;
 }
 
 void MainWindow::populateTweaks() {
@@ -363,29 +445,186 @@ void MainWindow::populateTweaks() {
     }
 }
 
-HWND MainWindow::createPlaceholderPanel(HWND parent, const wchar_t* title, const wchar_t* body) {
-    HWND panel = CreateWindowExW(0, kPanelClass, L"",
-        WS_CHILD, 0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+HWND MainWindow::createUnattendedPanel(HWND parent) {
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
+        0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
 
-    HWND lblTitle = CreateWindowExW(0, L"STATIC", title,
-        WS_CHILD | WS_VISIBLE, kPad, kPad, 600, 24,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblTitle, WM_SETFONT, (WPARAM)hFontBold_, TRUE);
+    mkLabel(p, L"Unattended", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
+        L"OOBE answers for autounattend.xml. Leave fields blank to let "
+        L"setup ask the user.",
+        kPad, kPad + 32, 820, 40, hFont_);
 
-    HWND lblBody = CreateWindowExW(0, L"STATIC", body,
-        WS_CHILD | WS_VISIBLE,
-        kPad, kPad + 32, 800, 200,
-        panel, nullptr, hInstance_, nullptr);
-    SendMessageW(lblBody, WM_SETFONT, (WPARAM)hFont_, TRUE);
+    int y = kPad + 80;
+    int lblW = 160, edW = 320, h = 24, gap = 32;
 
-    return panel;
+    mkLabel(p, L"Locale:", kPad, y, lblW, h, hFont_);
+    hwndEditLocale_ = mkEdit(p, L"en-US", kPad + lblW, y, edW, h, hFont_, 0);
+    y += gap;
+
+    mkLabel(p, L"Time zone:", kPad, y, lblW, h, hFont_);
+    hwndEditTimezone_ = mkEdit(p, L"UTC", kPad + lblW, y, edW, h, hFont_, 0);
+    y += gap;
+
+    mkLabel(p, L"Computer name:", kPad, y, lblW, h, hFont_);
+    hwndEditComputerName_ = mkEdit(p, L"", kPad + lblW, y, edW, h, hFont_, 0);
+    y += gap;
+
+    mkLabel(p, L"Administrator password:", kPad, y, lblW, h, hFont_);
+    hwndEditAdminPassword_ = mkEdit(p, L"", kPad + lblW, y, edW, h,
+        hFont_, 0, ES_PASSWORD);
+    y += gap + 8;
+
+    hwndChkSkipMsAccount_ = mkChk(p,
+        L"Skip the Microsoft account / online account screens",
+        kPad + lblW, y, 480, 22, hFont_, 0, true);
+    y += gap;
+
+    hwndChkAcceptEula_ = mkChk(p,
+        L"Auto-accept the EULA (hide EULA page)",
+        kPad + lblW, y, 480, 22, hFont_, 0, true);
+    y += gap;
+
+    hwndChkAutoLogon_ = mkChk(p,
+        L"Auto-logon on first boot",
+        kPad + lblW, y, 480, 22, hFont_, 0, false);
+    y += gap;
+
+    mkLabel(p, L"Auto-logon user:", kPad, y, lblW, h, hFont_);
+    hwndEditAutoLogonUser_ = mkEdit(p, L"", kPad + lblW, y, edW, h, hFont_, 0);
+    y += gap;
+
+    mkLabel(p, L"Auto-logon password:", kPad, y, lblW, h, hFont_);
+    hwndEditAutoLogonPwd_ = mkEdit(p, L"", kPad + lblW, y, edW, h,
+        hFont_, 0, ES_PASSWORD);
+
+    return p;
+}
+
+HWND MainWindow::createCommandsPanel(HWND parent) {
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
+        0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+
+    mkLabel(p, L"Commands", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
+        L"Run arbitrary command lines during setup. Pre-logon commands "
+        L"run as SYSTEM before the first user logon (SetupComplete.cmd). "
+        L"Post-logon commands run after the first user signs in "
+        L"(FirstLogonCommands).",
+        kPad, kPad + 32, 820, 50, hFont_);
+
+    mkLabel(p, L"Command line:", kPad, kPad + 92, 120, 22, hFont_);
+    hwndCmdEdit_ = mkEdit(p, L"", kPad + 130, kPad + 90, 690, 24, hFont_, 0);
+
+    hwndBtnAddPre_  = mkBtn(p, L"Add to Pre-logon",  kPad + 130,
+        kPad + 122, 180, 28, hFont_, ID_ADD_PRE);
+    hwndBtnAddPost_ = mkBtn(p, L"Add to Post-logon", kPad + 320,
+        kPad + 122, 180, 28, hFont_, ID_ADD_POST);
+
+    mkLabel(p, L"Pre-logon (SYSTEM, before first logon):",
+        kPad, kPad + 168, 600, 22, hFontBold_);
+    hwndPreList_  = mkListBox(p, kPad, kPad + 192, 820, 130, hFont_, 0);
+    hwndBtnDelPre_ = mkBtn(p, L"Remove selected", kPad,
+        kPad + 328, 160, 26, hFont_, ID_DEL_PRE);
+
+    mkLabel(p, L"Post-logon (after first user logon):",
+        kPad, kPad + 366, 600, 22, hFontBold_);
+    hwndPostList_  = mkListBox(p, kPad, kPad + 390, 820, 130, hFont_, 0);
+    hwndBtnDelPost_ = mkBtn(p, L"Remove selected", kPad,
+        kPad + 526, 160, 26, hFont_, ID_DEL_POST);
+
+    return p;
+}
+
+HWND MainWindow::createDriversPanel(HWND parent) {
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
+        0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+
+    mkLabel(p, L"Drivers", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
+        L"Inject .inf drivers into the offline image (DISM /Add-Driver "
+        L"/Recurse).",
+        kPad, kPad + 32, 820, 24, hFont_);
+
+    hwndDriversList_ = mkLV(p, kPad, kPad + 70, 690, 480, hFont_, 0, 0);
+    addCol(hwndDriversList_, 0, 660, L"Driver .inf path");
+
+    hwndBtnAddDriver_ = mkBtn(p, L"Add...",  kPad + 720, kPad + 70,
+        120, 30, hFont_, ID_ADD_DRIVER);
+    hwndBtnDelDriver_ = mkBtn(p, L"Remove", kPad + 720, kPad + 110,
+        120, 30, hFont_, ID_DEL_DRIVER);
+
+    return p;
+}
+
+HWND MainWindow::createUpdatesPanel(HWND parent) {
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
+        0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+
+    mkLabel(p, L"Updates", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
+        L"Slipstream .msu and .cab updates into the offline image "
+        L"(DISM /Add-Package).",
+        kPad, kPad + 32, 820, 24, hFont_);
+
+    hwndUpdatesList_ = mkLV(p, kPad, kPad + 70, 690, 480, hFont_, 0, 0);
+    addCol(hwndUpdatesList_, 0, 660, L"Update .msu / .cab path");
+
+    hwndBtnAddUpdate_ = mkBtn(p, L"Add...",  kPad + 720, kPad + 70,
+        120, 30, hFont_, ID_ADD_UPDATE);
+    hwndBtnDelUpdate_ = mkBtn(p, L"Remove", kPad + 720, kPad + 110,
+        120, 30, hFont_, ID_DEL_UPDATE);
+
+    return p;
+}
+
+HWND MainWindow::createPendingPanel(HWND parent) {
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
+        0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+
+    mkLabel(p, L"Pending Changes", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
+        L"Every edit you make is queued here. Review or remove items "
+        L"before clicking Build ISO on the Apply page.",
+        kPad, kPad + 32, 820, 40, hFont_);
+
+    hwndPendingList_ = mkLV(p, kPad, kPad + 80, 820, 440, hFont_, 0, 0);
+    addCol(hwndPendingList_, 0, 360, L"Description");
+    addCol(hwndPendingList_, 1, 110, L"Kind");
+    addCol(hwndPendingList_, 2, 90,  L"Action");
+    addCol(hwndPendingList_, 3, 220, L"Target ID");
+
+    hwndBtnPendingDel_   = mkBtn(p, L"Remove selected", kPad,
+        kPad + 530, 160, 28, hFont_, ID_PENDING_DEL);
+    hwndBtnPendingClear_ = mkBtn(p, L"Clear all", kPad + 170,
+        kPad + 530, 120, 28, hFont_, ID_PENDING_CLEAR);
+
+    return p;
+}
+
+HWND MainWindow::createApplyPanel(HWND parent) {
+    HWND p = CreateWindowExW(0, kPanelClass, L"", WS_CHILD,
+        0, 0, 0, 0, parent, nullptr, hInstance_, nullptr);
+
+    mkLabel(p, L"Apply", kPad, kPad, 400, 24, hFontBold_);
+    mkLabel(p,
+        L"Build the customized ISO. You will be asked where to save it.",
+        kPad, kPad + 32, 820, 24, hFont_);
+
+    hwndApplySummary_ = mkEdit(p, L"",
+        kPad, kPad + 70, 820, 220, hFont_, 0,
+        ES_MULTILINE | ES_READONLY | WS_VSCROLL);
+
+    hwndBtnBuildIso_ = mkBtn(p, L"Build ISO...", kPad, kPad + 310,
+        180, 36, hFontBold_, ID_BUILD_ISO, BS_DEFPUSHBUTTON);
+
+    return p;
 }
 
 void MainWindow::onCreate(HWND hwnd) {
     createHeader(hwnd);
 
-    hwndNav_ = CreateWindowExW(
-        0, WC_TREEVIEWW, L"",
+    hwndNav_ = CreateWindowExW(0, WC_TREEVIEWW, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP |
             TVS_HASBUTTONS | TVS_SHOWSELALWAYS |
             TVS_TRACKSELECT | TVS_FULLROWSELECT | TVS_NOHSCROLL,
@@ -394,54 +633,29 @@ void MainWindow::onCreate(HWND hwnd) {
     SetWindowTheme(hwndNav_, L"Explorer", nullptr);
     SendMessageW(hwndNav_, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
-    hwndDetail_ = CreateWindowExW(
-        0, L"STATIC", L"",
-        WS_CHILD | WS_VISIBLE | SS_WHITERECT,
+    hwndDetail_ = CreateWindowExW(0, kPanelClass, L"",
+        WS_CHILD | WS_VISIBLE,
         kNavWidth, 0, 100, 100,
         hwnd, (HMENU)(INT_PTR)ID_DETAIL, hInstance_, nullptr);
 
-    hwndStatus_ = CreateWindowExW(
-        0, STATUSCLASSNAMEW, L"Ready",
+    hwndStatus_ = CreateWindowExW(0, STATUSCLASSNAMEW, L"Ready",
         WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
         0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)ID_STATUS, hInstance_, nullptr);
     SendMessageW(hwndStatus_, WM_SETFONT, (WPARAM)hFont_, TRUE);
 
-    // Build all panels up front; show the active one on selection.
-    hwndPanelImage_  = createImagePanel(hwndDetail_);
-    hwndPanelTweaks_ = createTweaksPanel(hwndDetail_);
-    hwndPanelApply_  = createApplyPanel(hwndDetail_);
+    hwndPanelImage_      = createImagePanel       (hwndDetail_);
+    hwndPanelEditions_   = createEditionsPanel    (hwndDetail_);
+    hwndPanelComponents_ = createComponentsPanel  (hwndDetail_);
+    hwndPanelFeatures_   = createFeaturesPanel    (hwndDetail_);
+    hwndPanelApps_       = createApplicationsPanel(hwndDetail_);
+    hwndPanelTweaks_     = createTweaksPanel      (hwndDetail_);
+    hwndPanelUnattended_ = createUnattendedPanel  (hwndDetail_);
+    hwndPanelCommands_   = createCommandsPanel    (hwndDetail_);
+    hwndPanelDrivers_    = createDriversPanel     (hwndDetail_);
+    hwndPanelUpdates_    = createUpdatesPanel     (hwndDetail_);
+    hwndPanelPending_    = createPendingPanel     (hwndDetail_);
+    hwndPanelApply_      = createApplyPanel       (hwndDetail_);
 
-    auto mkPlaceholder = [&](Section s, const wchar_t* title, const wchar_t* body) {
-        placeholders_[(int)s] = createPlaceholderPanel(hwndDetail_, title, body);
-    };
-    mkPlaceholder(Section::Editions, L"Editions",
-        L"After loading an ISO, this panel will list every Windows edition "
-        L"in install.wim. Pick one or many; unselected editions can be "
-        L"trimmed from the output ISO.");
-    mkPlaceholder(Section::Components, L"Components",
-        L"Provisioned AppX packages and inbox components removable from "
-        L"the image. Populated from DISM /Get-ProvisionedAppxPackages.");
-    mkPlaceholder(Section::Features, L"Features",
-        L"Optional Windows features. Populated from DISM /Get-Features.");
-    mkPlaceholder(Section::Applications, L"Applications",
-        L"Third-party app catalog: Antigravity, Brave, Edge, VS Code, "
-        L"Windsurf, Cursor, Claude. Selected apps are silent-installed by "
-        L"SetupComplete.cmd before first user logon.");
-    mkPlaceholder(Section::Unattended, L"Unattended",
-        L"OOBE answers: locale, timezone, computer name, admin password, "
-        L"skip Microsoft account, accept EULA, auto-logon.");
-    mkPlaceholder(Section::Commands, L"Commands",
-        L"Pre-logon and post-logon command lists. Unlimited entries each. "
-        L"Pre-logon goes into SetupComplete.cmd (SYSTEM context). "
-        L"Post-logon goes into FirstLogonCommands.");
-    mkPlaceholder(Section::Drivers, L"Drivers",
-        L"Inject .inf drivers into the offline image via DISM /Add-Driver.");
-    mkPlaceholder(Section::Updates, L"Updates",
-        L"Slipstream .msu / .cab updates via DISM /Add-Package.");
-    mkPlaceholder(Section::PendingChanges, L"Pending Changes",
-        L"Every edit you make is queued here. Review, reorder, or remove "
-        L"items before clicking Apply. The queue can be saved and re-loaded "
-        L"as a build profile.");
     buildNavTree();
     layoutChildren();
     showSection(Section::Image);
@@ -474,9 +688,7 @@ void MainWindow::layoutChildren() {
         statusH = sr.bottom - sr.top;
     }
 
-    // Header strip across the top
-    if (hwndHeader_)
-        MoveWindow(hwndHeader_, 0, 0, rc.right, kHeaderHeight, TRUE);
+    if (hwndHeader_) MoveWindow(hwndHeader_, 0, 0, rc.right, kHeaderHeight, TRUE);
     if (hwndLoadIsoBtn_) {
         int x = rc.right - 140 - kPad;
         MoveWindow(hwndLoadIsoBtn_, x, 18, 140, 30, TRUE);
@@ -491,13 +703,20 @@ void MainWindow::layoutChildren() {
         MoveWindow(hwndDetail_, kNavWidth, contentTop,
                    rc.right - kNavWidth, contentH, TRUE);
 
-    // Resize each panel to fill the detail container
     RECT dr; GetClientRect(hwndDetail_, &dr);
     auto fit = [&](HWND h) { if (h) MoveWindow(h, 0, 0, dr.right, dr.bottom, TRUE); };
     fit(hwndPanelImage_);
+    fit(hwndPanelEditions_);
+    fit(hwndPanelComponents_);
+    fit(hwndPanelFeatures_);
+    fit(hwndPanelApps_);
     fit(hwndPanelTweaks_);
+    fit(hwndPanelUnattended_);
+    fit(hwndPanelCommands_);
+    fit(hwndPanelDrivers_);
+    fit(hwndPanelUpdates_);
+    fit(hwndPanelPending_);
     fit(hwndPanelApply_);
-    for (auto& kv : placeholders_) fit(kv.second);
 }
 
 void MainWindow::onNotify(LPNMHDR n) {
@@ -509,8 +728,23 @@ void MainWindow::onNotify(LPNMHDR n) {
         auto* lv = (LPNMLISTVIEW)n;
         if (lv->iItem >= 0 && (lv->uChanged & LVIF_STATE)) {
             const auto& cat = wid::core::tweakCatalog();
-            if ((size_t)lv->iItem < cat.size()) {
+            if ((size_t)lv->iItem < cat.size())
                 SetWindowTextW(hwndTweaksDesc_, cat[lv->iItem].description.c_str());
+        }
+    } else if (n->hwndFrom == hwndAppsList_ && n->code == LVN_ITEMCHANGED) {
+        auto* lv = (LPNMLISTVIEW)n;
+        if (lv->iItem >= 0 && (lv->uChanged & LVIF_STATE)) {
+            const auto& cat = wid::core::builtinAppCatalog();
+            if ((size_t)lv->iItem < cat.size()) {
+                const auto& a = cat[lv->iItem];
+                std::wstring s;
+                s += L"Vendor: " + a.vendor + L"\r\n";
+                s += L"ID: " + a.id + L"\r\n";
+                s += L"Silent install switches: " + a.silentArgs + L"\r\n";
+                s += L"Download URL: " + (a.downloadUrl.empty()
+                    ? std::wstring(L"(none in catalog; supply local installer)")
+                    : a.downloadUrl);
+                SetWindowTextW(hwndAppsDesc_, s.c_str());
             }
         }
     }
@@ -519,35 +753,48 @@ void MainWindow::onNotify(LPNMHDR n) {
 void MainWindow::onCommand(WORD id, HWND /*ctrl*/) {
     switch (id) {
     case ID_LOAD_ISO:
-    case ID_BROWSE_SRC: onBrowseSourceIso(); break;
-    case ID_BUILD_ISO:  onBuildIso();        break;
+    case ID_BROWSE_SRC:    onBrowseSourceIso(); break;
+    case ID_BUILD_ISO:     onBuildIso();        break;
+    case ID_ADD_DRIVER:    onAddDriver();       break;
+    case ID_DEL_DRIVER:    onRemoveDriver();    break;
+    case ID_ADD_UPDATE:    onAddUpdate();       break;
+    case ID_DEL_UPDATE:    onRemoveUpdate();    break;
+    case ID_ADD_PRE:       onAddCommand(false); break;
+    case ID_ADD_POST:      onAddCommand(true);  break;
+    case ID_DEL_PRE:       onRemoveCommand(false); break;
+    case ID_DEL_POST:      onRemoveCommand(true);  break;
+    case ID_PENDING_DEL:   onPendingRemove();   break;
+    case ID_PENDING_CLEAR: onPendingClear();    break;
     }
 }
 
-bool MainWindow::pickFile(bool save, const wchar_t* title, std::wstring& out) {
+bool MainWindow::pickFile(bool save, const wchar_t* title,
+                          const wchar_t* filterExt, const wchar_t* defExt,
+                          std::wstring& out) {
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     bool needUninit = SUCCEEDED(hr);
 
     IFileDialog* dlg = nullptr;
     hr = CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog,
-                          nullptr, CLSCTX_INPROC_SERVER,
-                          IID_PPV_ARGS(&dlg));
+                          nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg));
     bool ok = false;
     if (SUCCEEDED(hr) && dlg) {
-        COMDLG_FILTERSPEC f[] = { { L"ISO image", L"*.iso" },
-                                  { L"All files", L"*.*"   } };
-        dlg->SetFileTypes(2, f);
-        dlg->SetFileTypeIndex(1);
-        dlg->SetDefaultExtension(L"iso");
+        if (filterExt && *filterExt) {
+            COMDLG_FILTERSPEC f[] = {
+                { L"Filtered files", filterExt },
+                { L"All files",      L"*.*"    } };
+            dlg->SetFileTypes(2, f);
+            dlg->SetFileTypeIndex(1);
+        }
+        if (defExt && *defExt) dlg->SetDefaultExtension(defExt);
         dlg->SetTitle(title);
         if (SUCCEEDED(dlg->Show(hwnd_))) {
             IShellItem* item = nullptr;
             if (SUCCEEDED(dlg->GetResult(&item)) && item) {
                 LPWSTR path = nullptr;
-                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
-                    out = path;
-                    CoTaskMemFree(path);
-                    ok = true;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))
+                    && path) {
+                    out = path; CoTaskMemFree(path); ok = true;
                 }
                 item->Release();
             }
@@ -560,7 +807,7 @@ bool MainWindow::pickFile(bool save, const wchar_t* title, std::wstring& out) {
 
 void MainWindow::onBrowseSourceIso() {
     std::wstring path;
-    if (pickFile(false, L"Select source Windows ISO", path)) {
+    if (pickFile(false, L"Select source Windows ISO", L"*.iso", L"iso", path)) {
         SetWindowTextW(hwndEditSourceIso_, path.c_str());
         showSection(Section::Image);
         SendMessageW(hwndStatus_, SB_SETTEXTW, 0, (LPARAM)L"Source ISO selected");
@@ -576,40 +823,106 @@ void MainWindow::onBuildIso() {
             L"WID Utility", MB_ICONINFORMATION);
         return;
     }
-
     std::wstring out;
-    if (!pickFile(true, L"Save built ISO as", out)) return;
+    if (!pickFile(true, L"Save built ISO as", L"*.iso", L"iso", out)) return;
 
-    std::wstring summary;
-    summary  = L"Source ISO: "; summary += src; summary += L"\r\n";
-    summary += L"Output ISO: "; summary += out; summary += L"\r\n\r\n";
-    summary += L"Pipeline integration is not yet wired up. The 11-stage "
-               L"build (extract, mount, edits, DISM, scripts, commit, "
-               L"trim, oscdimg, verify) will run here once the apply path "
-               L"is connected.";
-    SetWindowTextW(hwndApplySummary_, summary.c_str());
+    std::wstring s;
+    s  = L"Source ISO: "; s += src; s += L"\r\n";
+    s += L"Output ISO: "; s += out; s += L"\r\n\r\n";
+    s += L"Pipeline integration is not yet wired up. The 11-stage build "
+         L"(extract, mount, edits, DISM, scripts, commit, trim, oscdimg, "
+         L"verify) will run here once the apply path is connected.";
+    SetWindowTextW(hwndApplySummary_, s.c_str());
     SendMessageW(hwndStatus_, SB_SETTEXTW, 0,
                  (LPARAM)L"Build requested (pipeline not yet wired)");
+}
+
+void MainWindow::onAddDriver() {
+    std::wstring path;
+    if (!pickFile(false, L"Select driver .inf", L"*.inf", L"inf", path)) return;
+    LVITEMW it{};
+    it.mask = LVIF_TEXT;
+    it.iItem = ListView_GetItemCount(hwndDriversList_);
+    it.pszText = (LPWSTR)path.c_str();
+    ListView_InsertItem(hwndDriversList_, &it);
+}
+
+void MainWindow::onRemoveDriver() {
+    int sel = ListView_GetNextItem(hwndDriversList_, -1, LVNI_SELECTED);
+    if (sel >= 0) ListView_DeleteItem(hwndDriversList_, sel);
+}
+
+void MainWindow::onAddUpdate() {
+    std::wstring path;
+    if (!pickFile(false, L"Select update .msu or .cab",
+                  L"*.msu;*.cab", L"msu", path)) return;
+    LVITEMW it{};
+    it.mask = LVIF_TEXT;
+    it.iItem = ListView_GetItemCount(hwndUpdatesList_);
+    it.pszText = (LPWSTR)path.c_str();
+    ListView_InsertItem(hwndUpdatesList_, &it);
+}
+
+void MainWindow::onRemoveUpdate() {
+    int sel = ListView_GetNextItem(hwndUpdatesList_, -1, LVNI_SELECTED);
+    if (sel >= 0) ListView_DeleteItem(hwndUpdatesList_, sel);
+}
+
+void MainWindow::onAddCommand(bool postLogon) {
+    wchar_t buf[2048]{};
+    GetWindowTextW(hwndCmdEdit_, buf, (int)std::size(buf));
+    if (!buf[0]) {
+        MessageBoxW(hwnd_,
+            L"Type a command line first.",
+            L"WID Utility", MB_ICONINFORMATION);
+        return;
+    }
+    HWND list = postLogon ? hwndPostList_ : hwndPreList_;
+    SendMessageW(list, LB_ADDSTRING, 0, (LPARAM)buf);
+    SetWindowTextW(hwndCmdEdit_, L"");
+}
+
+void MainWindow::onRemoveCommand(bool postLogon) {
+    HWND list = postLogon ? hwndPostList_ : hwndPreList_;
+    int sel = (int)SendMessageW(list, LB_GETCURSEL, 0, 0);
+    if (sel != LB_ERR)
+        SendMessageW(list, LB_DELETESTRING, sel, 0);
+}
+
+void MainWindow::onPendingRemove() {
+    int sel = ListView_GetNextItem(hwndPendingList_, -1, LVNI_SELECTED);
+    if (sel >= 0) ListView_DeleteItem(hwndPendingList_, sel);
+}
+
+void MainWindow::onPendingClear() {
+    ListView_DeleteAllItems(hwndPendingList_);
 }
 
 void MainWindow::showSection(Section s) {
     current_ = s;
 
-    auto hide = [](HWND h) { if (h) ShowWindow(h, SW_HIDE); };
-    hide(hwndPanelImage_);
-    hide(hwndPanelTweaks_);
-    hide(hwndPanelApply_);
-    for (auto& kv : placeholders_) hide(kv.second);
+    HWND panels[] = {
+        hwndPanelImage_, hwndPanelEditions_, hwndPanelComponents_,
+        hwndPanelFeatures_, hwndPanelApps_, hwndPanelTweaks_,
+        hwndPanelUnattended_, hwndPanelCommands_, hwndPanelDrivers_,
+        hwndPanelUpdates_, hwndPanelPending_, hwndPanelApply_,
+    };
+    for (HWND h : panels) if (h) ShowWindow(h, SW_HIDE);
 
     HWND target = nullptr;
     switch (s) {
-    case Section::Image:  target = hwndPanelImage_;  break;
-    case Section::Tweaks: target = hwndPanelTweaks_; break;
-    case Section::Apply:  target = hwndPanelApply_;  break;
-    default: {
-        auto it = placeholders_.find((int)s);
-        if (it != placeholders_.end()) target = it->second;
-    } break;
+    case Section::Image:          target = hwndPanelImage_;      break;
+    case Section::Editions:       target = hwndPanelEditions_;   break;
+    case Section::Components:     target = hwndPanelComponents_; break;
+    case Section::Features:       target = hwndPanelFeatures_;   break;
+    case Section::Applications:   target = hwndPanelApps_;       break;
+    case Section::Tweaks:         target = hwndPanelTweaks_;     break;
+    case Section::Unattended:     target = hwndPanelUnattended_; break;
+    case Section::Commands:       target = hwndPanelCommands_;   break;
+    case Section::Drivers:        target = hwndPanelDrivers_;    break;
+    case Section::Updates:        target = hwndPanelUpdates_;    break;
+    case Section::PendingChanges: target = hwndPanelPending_;    break;
+    case Section::Apply:          target = hwndPanelApply_;      break;
     }
     if (target) ShowWindow(target, SW_SHOW);
 

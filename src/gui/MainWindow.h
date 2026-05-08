@@ -44,52 +44,125 @@ private:
     void layoutChildren();
     void buildNavTree();
     void showSection(Section);
-
-    // Header / chrome
     void createHeader(HWND parent);
 
-    // Per-section panels
-    HWND createImagePanel(HWND parent);
-    HWND createTweaksPanel(HWND parent);
-    HWND createApplyPanel(HWND parent);
-    HWND createPlaceholderPanel(HWND parent, const wchar_t* title, const wchar_t* body);
-    void populateTweaks();
+    HWND createImagePanel       (HWND parent);
+    HWND createEditionsPanel    (HWND parent);
+    HWND createComponentsPanel  (HWND parent);
+    HWND createFeaturesPanel    (HWND parent);
+    HWND createApplicationsPanel(HWND parent);
+    HWND createTweaksPanel      (HWND parent);
+    HWND createUnattendedPanel  (HWND parent);
+    HWND createCommandsPanel    (HWND parent);
+    HWND createDriversPanel     (HWND parent);
+    HWND createUpdatesPanel     (HWND parent);
+    HWND createPendingPanel     (HWND parent);
+    HWND createApplyPanel       (HWND parent);
 
-    // Browse helpers
+    void populateTweaks();
+    void populateApps();
+
+    // Browse / actions
     void onBrowseSourceIso();
     void onBuildIso();
-    bool pickFile(bool save, const wchar_t* title, std::wstring& out);
+    void onAddDriver();
+    void onRemoveDriver();
+    void onAddUpdate();
+    void onRemoveUpdate();
+    void onAddCommand(bool postLogon);
+    void onRemoveCommand(bool postLogon);
+    void onPendingRemove();
+    void onPendingClear();
+
+    bool pickFile(bool save, const wchar_t* title,
+                  const wchar_t* filter, const wchar_t* defExt,
+                  std::wstring& out);
 
     HINSTANCE hInstance_;
     HFONT     hFont_       = nullptr;
     HFONT     hFontBold_   = nullptr;
     HFONT     hFontTitle_  = nullptr;
 
-    HWND hwnd_         = nullptr;
-    HWND hwndHeader_   = nullptr;
-    HWND hwndHeaderTitle_ = nullptr;
-    HWND hwndLoadIsoBtn_  = nullptr;
-    HWND hwndNav_      = nullptr;
-    HWND hwndDetail_   = nullptr;     // container hosting the per-section panels
-    HWND hwndStatus_   = nullptr;
+    HWND hwnd_              = nullptr;
+    HWND hwndHeader_        = nullptr;
+    HWND hwndHeaderTitle_   = nullptr;
+    HWND hwndLoadIsoBtn_    = nullptr;
+    HWND hwndNav_           = nullptr;
+    HWND hwndDetail_        = nullptr;
+    HWND hwndStatus_        = nullptr;
 
-    // Image panel
+    // Image
     HWND hwndPanelImage_     = nullptr;
     HWND hwndEditSourceIso_  = nullptr;
     HWND hwndBtnBrowseSrc_   = nullptr;
 
-    // Tweaks panel
+    // Editions
+    HWND hwndPanelEditions_  = nullptr;
+    HWND hwndEditionsList_   = nullptr;
+    HWND hwndChkTrim_        = nullptr;
+
+    // Components
+    HWND hwndPanelComponents_ = nullptr;
+    HWND hwndComponentsList_  = nullptr;
+
+    // Features
+    HWND hwndPanelFeatures_  = nullptr;
+    HWND hwndFeaturesList_   = nullptr;
+
+    // Applications
+    HWND hwndPanelApps_      = nullptr;
+    HWND hwndAppsList_       = nullptr;
+    HWND hwndAppsDesc_       = nullptr;
+
+    // Tweaks
     HWND hwndPanelTweaks_    = nullptr;
     HWND hwndTweaksList_     = nullptr;
     HWND hwndTweaksDesc_     = nullptr;
 
-    // Apply panel
+    // Unattended
+    HWND hwndPanelUnattended_     = nullptr;
+    HWND hwndEditLocale_          = nullptr;
+    HWND hwndEditTimezone_        = nullptr;
+    HWND hwndEditComputerName_    = nullptr;
+    HWND hwndEditAdminPassword_   = nullptr;
+    HWND hwndEditAutoLogonUser_   = nullptr;
+    HWND hwndEditAutoLogonPwd_    = nullptr;
+    HWND hwndChkSkipMsAccount_    = nullptr;
+    HWND hwndChkAcceptEula_       = nullptr;
+    HWND hwndChkAutoLogon_        = nullptr;
+
+    // Commands
+    HWND hwndPanelCommands_  = nullptr;
+    HWND hwndPreList_        = nullptr;
+    HWND hwndPostList_       = nullptr;
+    HWND hwndCmdEdit_        = nullptr;
+    HWND hwndBtnAddPre_      = nullptr;
+    HWND hwndBtnAddPost_     = nullptr;
+    HWND hwndBtnDelPre_      = nullptr;
+    HWND hwndBtnDelPost_     = nullptr;
+
+    // Drivers
+    HWND hwndPanelDrivers_   = nullptr;
+    HWND hwndDriversList_    = nullptr;
+    HWND hwndBtnAddDriver_   = nullptr;
+    HWND hwndBtnDelDriver_   = nullptr;
+
+    // Updates
+    HWND hwndPanelUpdates_   = nullptr;
+    HWND hwndUpdatesList_    = nullptr;
+    HWND hwndBtnAddUpdate_   = nullptr;
+    HWND hwndBtnDelUpdate_   = nullptr;
+
+    // Pending Changes
+    HWND hwndPanelPending_   = nullptr;
+    HWND hwndPendingList_    = nullptr;
+    HWND hwndBtnPendingDel_  = nullptr;
+    HWND hwndBtnPendingClear_= nullptr;
+
+    // Apply
     HWND hwndPanelApply_     = nullptr;
     HWND hwndApplySummary_   = nullptr;
     HWND hwndBtnBuildIso_    = nullptr;
-
-    // Placeholder panels per section
-    std::unordered_map<int, HWND> placeholders_;
 
     Section current_ = Section::Image;
 };
