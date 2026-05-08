@@ -52,6 +52,7 @@ std::vector<WimEdition> getWimInfo(const fs::path& wimFile, const ProgressFn& pr
     po.executable = dism->wstring();
     po.args = { L"/English", L"/Get-WimInfo",
                 L"/WimFile:" + wimFile.wstring() };
+    po.timeoutMs = 60000;
     auto res = util::run(po);
     if (!res.launched || !res.finished || res.exitCode != 0) return editions;
 
@@ -112,6 +113,7 @@ std::vector<WimEdition> inspectIso(const fs::path& iso, const ProgressFn& progre
         L"};"
         L"Write-Output ('DRIVE=' + $drive)"
     };
+    mount.timeoutMs = 60000;
     auto mr = util::run(mount);
     log.debug(L"inspectIso mount stdout: " + mr.stdoutText, L"inspectIso");
     if (!mr.stderrText.empty())
@@ -165,6 +167,7 @@ std::vector<WimEdition> inspectIso(const fs::path& iso, const ProgressFn& progre
         L"-Command",
         L"Dismount-DiskImage -ImagePath $env:WID_ISO | Out-Null"
     };
+    dismount.timeoutMs = 60000;
     util::run(dismount);
     SetEnvironmentVariableW(L"WID_ISO", nullptr);
 

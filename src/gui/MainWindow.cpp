@@ -278,8 +278,13 @@ LRESULT MainWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EnableWindow(hwndLoadIsoBtn_, TRUE);
         if (r->editions.empty()) {
             SetWindowTextW(hwndLoadIsoBtn_, L"Load ISO...");
-            SendMessageW(hwndStatus_, SB_SETTEXTW, 0,
-                (LPARAM)L"ISO inspection failed. Check that the file is a Windows installation ISO.");
+            wchar_t tmp[MAX_PATH];
+            GetTempPathW(MAX_PATH, tmp);
+            std::wstring msg =
+                L"ISO inspection failed. See log: ";
+            msg += tmp;
+            msg += L"WIDUtility.log";
+            SendMessageW(hwndStatus_, SB_SETTEXTW, 0, (LPARAM)msg.c_str());
         } else {
             SetWindowTextW(hwndLoadIsoBtn_, L"Change ISO...");
             wchar_t msg[128];
