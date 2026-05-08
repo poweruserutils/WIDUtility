@@ -2,10 +2,12 @@
 
 #include "core/Apps.h"
 #include "core/Tweaks.h"
+#include "core/Wim.h"
 
 #include <windowsx.h>
 #include <uxtheme.h>
 #include <shobjidl.h>
+#include <thread>
 #include <vector>
 
 namespace wid::gui {
@@ -39,6 +41,13 @@ constexpr WORD ID_DEL_PRE           = 2062;
 constexpr WORD ID_DEL_POST          = 2063;
 constexpr WORD ID_PENDING_DEL       = 2070;
 constexpr WORD ID_PENDING_CLEAR     = 2071;
+
+constexpr UINT WM_ISO_INSPECTED     = WM_APP + 1;
+
+struct InspectPayload {
+    std::wstring                       isoPath;
+    std::vector<wid::core::WimEdition> editions;
+};
 
 struct NavEntry { Section section; const wchar_t* label; };
 
@@ -244,6 +253,42 @@ LRESULT MainWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SIZE:     onSize(LOWORD(lp), HIWORD(lp)); return 0;
     case WM_COMMAND:  onCommand(LOWORD(wp), (HWND)lp); return 0;
     case WM_NOTIFY:   onNotify((LPNMHDR)lp); return 0;
+    case WM_ISO_INSPECTED: {
+        std::unique_ptr<InspectPayload> r((InspectPayload*)lp);
+        ListView_DeleteAllItems(hwndEditionsList_);
+        for (size_t i = 0; i < r->editions.size(); ++i) {
+            const auto& e = r->editions[i];
+            wchar_t idx[16]; swprintf_s(idx, L"%d", e.index);
+            wchar_t sz[64];
+            if (e.sizeBytes >= (1ull << 30))
+                swprintf_s(sz, L"%.2f GB", e.sizeBytes / (double)(1ull << 30));
+            else
+                swprintf_s(sz, L"%.0f MB", e.sizeBytes / (double)(1ull << 20));
+            LVITEMW it{};
+            it.mask = LVIF_TEXT;
+            it.iItem = (int)i;
+            it.pszText = idx;
+            ListView_InsertItem(hwndEditionsList_, &it);
+            ListView_SetItemText(hwndEditionsList_, (int)i, 1, (LPWSTR)e.name.c_str());
+            ListView_SetItemText(hwndEditionsList_, (int)i, 2, (LPWSTR)e.architecture.c_str());
+            ListView_SetItemText(hwndEditionsList_, (int)i, 3, sz);
+            ListView_SetItemText(hwndEditionsList_, (int)i, 4, (LPWSTR)e.description.c_str());
+            ListView_SetCheckState(hwndEditionsList_, (int)i, TRUE);
+        }
+        EnableWindow(hwndLoadIsoBtn_, TRUE);
+        if (r->editions.empty()) {
+            SetWindowTextW(hwndLoadIsoBtn_, L"Load ISO...");
+            SendMessageW(hwndStatus_, SB_SETTEXTW, 0,
+                (LPARAM)L"ISO inspection failed. Check that the file is a Windows installation ISO.");
+        } else {
+            SetWindowTextW(hwndLoadIsoBtn_, L"Change ISO...");
+            wchar_t msg[128];
+            swprintf_s(msg, L"ISO loaded: %zu edition(s) detected",
+                       r->editions.size());
+            SendMessageW(hwndStatus_, SB_SETTEXTW, 0, (LPARAM)msg);
+        }
+        return 0;
+    }
     case WM_CTLCOLORSTATIC: {
         HDC dc = (HDC)wp;
         SetBkMode(dc, TRANSPARENT);
@@ -456,7 +501,7 @@ HWND MainWindow::createUnattendedPanel(HWND parent) {
         kPad, kPad + 32, 820, 40, hFont_);
 
     int y = kPad + 80;
-    int lblW = 160, edW = 320, h = 24, gap = 32;
+    int lblW = 220, edW = 320, h = 24, gap = 32;
 
     mkLabel(p, L"Locale:", kPad, y, lblW, h, hFont_);
     hwndEditLocale_ = mkEdit(p, L"en-US", kPad + lblW, y, edW, h, hFont_, 0);
@@ -807,11 +852,23 @@ bool MainWindow::pickFile(bool save, const wchar_t* title,
 
 void MainWindow::onBrowseSourceIso() {
     std::wstring path;
-    if (pickFile(false, L"Select source Windows ISO", L"*.iso", L"iso", path)) {
-        SetWindowTextW(hwndEditSourceIso_, path.c_str());
-        showSection(Section::Image);
-        SendMessageW(hwndStatus_, SB_SETTEXTW, 0, (LPARAM)L"Source ISO selected");
-    }
+    if (!pickFile(false, L"Select source Windows ISO", L"*.iso", L"iso", path))
+        return;
+
+    SetWindowTextW(hwndEditSourceIso_, path.c_str());
+    SetWindowTextW(hwndLoadIsoBtn_, L"Inspecting...");
+    EnableWindow(hwndLoadIsoBtn_, FALSE);
+    SendMessageW(hwndStatus_, SB_SETTEXTW, 0,
+        (LPARAM)L"Mounting ISO and inspecting install.wim ...");
+
+    HWND target = hwnd_;
+    std::thread([target, path]() {
+        auto* payload = new InspectPayload{};
+        payload->isoPath  = path;
+        payload->editions = wid::core::inspectIso(path, nullptr);
+        if (!PostMessageW(target, WM_ISO_INSPECTED, 0, (LPARAM)payload))
+            delete payload;
+    }).detach();
 }
 
 void MainWindow::onBuildIso() {

@@ -4,6 +4,7 @@
 #include "util/Paths.h"
 #include "util/Process.h"
 
+#include <windows.h>
 #include <regex>
 #include <sstream>
 
@@ -87,6 +88,61 @@ std::vector<WimEdition> getWimInfo(const fs::path& wimFile, const ProgressFn& pr
     flush();
 
     if (progress) progress(L"Inspecting WIM", 100);
+    return editions;
+}
+
+std::vector<WimEdition> inspectIso(const fs::path& iso, const ProgressFn& progress) {
+    std::vector<WimEdition> empty;
+    SetEnvironmentVariableW(L"WID_ISO", iso.c_str());
+
+    util::ProcessOptions mount;
+    mount.executable = L"powershell.exe";
+    mount.args = {
+        L"-NoProfile", L"-NonInteractive", L"-ExecutionPolicy", L"Bypass",
+        L"-Command",
+        L"$ErrorActionPreference='Stop';"
+        L"$img = Mount-DiskImage -ImagePath $env:WID_ISO -PassThru;"
+        L"Start-Sleep -Milliseconds 750;"
+        L"$drive = ($img | Get-Volume).DriveLetter;"
+        L"Write-Output ('DRIVE=' + $drive)"
+    };
+    auto mr = util::run(mount);
+    if (!mr.finished || mr.exitCode != 0) {
+        SetEnvironmentVariableW(L"WID_ISO", nullptr);
+        return empty;
+    }
+
+    std::wstring drive;
+    auto pos = mr.stdoutText.find(L"DRIVE=");
+    if (pos != std::wstring::npos && pos + 6 < mr.stdoutText.size()) {
+        wchar_t c = mr.stdoutText[pos + 6];
+        if (iswalpha(c)) drive = std::wstring(1, c);
+    }
+
+    std::vector<WimEdition> editions;
+    if (!drive.empty()) {
+        fs::path wim = drive + L":\\sources\\install.wim";
+        std::error_code ec;
+        if (!fs::exists(wim, ec))
+            wim = drive + L":\\sources\\install.esd";
+        if (fs::exists(wim, ec))
+            editions = getWimInfo(wim, progress);
+        else
+            util::Log::instance().warn(
+                L"No install.wim or install.esd found on the mounted ISO.",
+                L"inspectIso");
+    }
+
+    util::ProcessOptions dismount;
+    dismount.executable = L"powershell.exe";
+    dismount.args = {
+        L"-NoProfile", L"-NonInteractive", L"-ExecutionPolicy", L"Bypass",
+        L"-Command",
+        L"Dismount-DiskImage -ImagePath $env:WID_ISO | Out-Null"
+    };
+    util::run(dismount);
+    SetEnvironmentVariableW(L"WID_ISO", nullptr);
+
     return editions;
 }
 

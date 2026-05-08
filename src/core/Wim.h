@@ -27,6 +27,11 @@ struct WimMount {
 
 std::vector<WimEdition> getWimInfo(const fs::path& wimFile, const ProgressFn& progress);
 
+// Mount the ISO read-only, run getWimInfo against the install.wim/.esd
+// inside it, and dismount. Used by the GUI to populate the Editions panel
+// without doing a full ISO extraction.
+std::vector<WimEdition> inspectIso(const fs::path& iso, const ProgressFn& progress);
+
 bool mountWim   (const WimMount& m, const ProgressFn& progress);
 bool unmountWim (const WimMount& m, bool commit, const ProgressFn& progress);
 
