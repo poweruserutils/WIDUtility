@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 #include "util/Log.h"
+#include "util/Paths.h"
 
 #include <windows.h>
 #include <fstream>
@@ -8,13 +9,6 @@
 #include <string>
 
 namespace {
-
-std::wstring tempLogPath() {
-    wchar_t buf[MAX_PATH];
-    DWORD n = GetTempPathW(MAX_PATH, buf);
-    if (n == 0 || n >= MAX_PATH) return L"WIDUtility.log";
-    return std::wstring(buf) + L"WIDUtility.log";
-}
 
 void installFileLogSink(const std::wstring& path) {
     auto file = std::make_shared<std::wofstream>(path, std::ios::app);
@@ -48,7 +42,11 @@ void installFileLogSink(const std::wstring& path) {
 } // namespace
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
-    installFileLogSink(tempLogPath());
+    wid::util::cleanOldScratchRoots();
+    installFileLogSink(wid::util::currentLogFile().wstring());
+
+    wid::util::Log::instance().info(
+        L"Log file: " + wid::util::currentLogFile().wstring(), L"main");
 
     wid::gui::MainWindow window(hInstance);
     if (!window.create()) {

@@ -6,6 +6,7 @@
 #include "core/Tweaks.h"
 #include "core/Wim.h"
 #include "util/Log.h"
+#include "util/Paths.h"
 
 #include <windowsx.h>
 #include <uxtheme.h>
@@ -283,12 +284,9 @@ LRESULT MainWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EnableWindow(hwndLoadIsoBtn_, TRUE);
         if (r->editions.empty()) {
             SetWindowTextW(hwndLoadIsoBtn_, L"Load ISO...");
-            wchar_t tmp[MAX_PATH];
-            GetTempPathW(MAX_PATH, tmp);
             std::wstring msg =
-                L"ISO inspection failed. See log: ";
-            msg += tmp;
-            msg += L"WIDUtility.log";
+                L"ISO inspection failed. See log: " +
+                wid::util::currentLogFile().wstring();
             SendMessageW(hwndStatus_, SB_SETTEXTW, 0, (LPARAM)msg.c_str());
         } else {
             SetWindowTextW(hwndLoadIsoBtn_, L"Change ISO...");
@@ -1035,7 +1033,8 @@ void MainWindow::onBuildIso() {
         });
         pw->postCompleted(ok,
             ok ? L"Build completed successfully."
-               : L"Build failed. See WIDUtility.log for details.");
+               : (L"Build failed. See log: " +
+                  wid::util::currentLogFile().wstring()));
     }).detach();
 }
 

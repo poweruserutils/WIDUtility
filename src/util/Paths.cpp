@@ -76,4 +76,44 @@ fs::path isoExtractDir(const fs::path& r) { return r / L"iso";   }
 fs::path wimMountDir  (const fs::path& r) { return r / L"mount"; }
 fs::path stageDir     (const fs::path& r) { return r / L"stage"; }
 
+fs::path desktopLogsDir() {
+    fs::path desk;
+    wchar_t buf[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY,
+                                   nullptr, 0, buf))) {
+        desk = buf;
+    } else if (auto u = envPath(L"USERPROFILE")) {
+        desk = *u / L"Desktop";
+    }
+    fs::path d = desk / L"WID Utility Logs";
+    std::error_code ec;
+    fs::create_directories(d, ec);
+    return d;
+}
+
+fs::path currentLogFile() {
+    static fs::path cached;
+    if (!cached.empty()) return cached;
+
+    SYSTEMTIME t; GetLocalTime(&t);
+    wchar_t name[64];
+    swprintf_s(name, L"WID-%04d%02d%02d-%02d%02d%02d.log",
+               t.wYear, t.wMonth, t.wDay,
+               t.wHour, t.wMinute, t.wSecond);
+    cached = desktopLogsDir() / name;
+    return cached;
+}
+
+void cleanOldScratchRoots() {
+    auto tmp = envPath(L"TEMP").value_or(fs::temp_directory_path());
+    fs::path root = tmp / L"WIDUtility";
+    std::error_code ec;
+    if (!fs::exists(root, ec)) return;
+    for (auto& entry : fs::directory_iterator(root, ec)) {
+        if (ec) break;
+        if (entry.is_directory(ec))
+            fs::remove_all(entry.path(), ec);
+    }
+}
+
 } // namespace wid::util
