@@ -117,15 +117,29 @@ OfflineHive::OfflineHive(const fs::path& hiveFile, const std::wstring& subkey)
     }
     stripReadOnly(stagedFile_);
 
-    for (const wchar_t* ext : kHiveCompanions) {
-        fs::path src = hiveFile_;
-        src += ext;
-        if (!fs::exists(src, ec)) continue;
-        fs::path dst = stagedFile_;
-        dst += ext;
-        std::error_code cec;
-        fs::copy_file(src, dst, fs::copy_options::overwrite_existing, cec);
-        if (!cec) stripReadOnly(dst);
+    // Intentionally do NOT copy .LOG1/.LOG2/etc.: on a freshly extracted WIM
+    // their transaction state can mismatch the primary file and put the
+    // loader into ERROR_BADDB (1009). With only the primary present, the
+    // loader treats the hive as standalone and regenerates logs as needed.
+
+    // Diagnostic: log the first 8 bytes of the staged hive so we can verify
+    // it starts with the expected "regf" signature (0x66676572).
+    {
+        HANDLE fh = CreateFileW(stagedFile_.c_str(), GENERIC_READ,
+                                FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (fh != INVALID_HANDLE_VALUE) {
+            BYTE hdr[8] = {};
+            DWORD got = 0;
+            ReadFile(fh, hdr, sizeof(hdr), &got, nullptr);
+            CloseHandle(fh);
+            wchar_t hex[64];
+            swprintf_s(hex,
+                       L"hive header bytes: %02X %02X %02X %02X %02X %02X %02X %02X",
+                       hdr[0], hdr[1], hdr[2], hdr[3],
+                       hdr[4], hdr[5], hdr[6], hdr[7]);
+            log.info(hex, L"Hive");
+        }
     }
 
     // Defensive: a previous crashed build may have left the subkey registered.
