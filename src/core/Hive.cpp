@@ -42,6 +42,12 @@ HKEY openOrCreate(HKEY parent, const std::wstring& path) {
 bool OfflineHive::enableHivePrivileges() {
     bool a = enablePrivilege(SE_RESTORE_NAME);
     bool b = enablePrivilege(SE_BACKUP_NAME);
+    if (!a || !b) {
+        util::Log::instance().warn(
+            std::wstring(L"Hive privilege grant: SeRestore=") +
+            (a ? L"ok" : L"FAIL") + L" SeBackup=" + (b ? L"ok" : L"FAIL"),
+            L"Hive");
+    }
     return a && b;
 }
 
@@ -127,25 +133,51 @@ OfflineHive::OfflineHive(const fs::path& hiveFile, const std::wstring& subkey)
 
     LONG r = RegLoadKeyW(HKEY_LOCAL_MACHINE, subkey_.c_str(),
                          stagedFile_.c_str());
-    if (r != ERROR_SUCCESS) {
-        auto sz = fs::file_size(stagedFile_, ec);
-        DWORD attrs = GetFileAttributesW(stagedFile_.c_str());
-        log.error(L"RegLoadKey failed for staged " + stagedFile_.wstring() +
-                  L" (error " + std::to_wstring(r) +
-                  L", size=" + std::to_wstring(sz) +
-                  L", attrs=" + std::to_wstring(attrs) + L")", L"Hive");
+    if (r == ERROR_SUCCESS) {
+        loaded_ = true;
         return;
     }
-    loaded_ = true;
+
+    auto sz = fs::file_size(stagedFile_, ec);
+    DWORD attrs = GetFileAttributesW(stagedFile_.c_str());
+    log.warn(L"RegLoadKey failed for staged " + stagedFile_.wstring() +
+             L" (error " + std::to_wstring(r) +
+             L", size=" + std::to_wstring(sz) +
+             L", attrs=" + std::to_wstring(attrs) +
+             L"); falling back to RegLoadAppKey", L"Hive");
+
+    // Fallback: RegLoadAppKey accepts arbitrary hive files, doesn't require
+    // a subkey under HKLM, and is more tolerant of modern hive formats than
+    // RegLoadKey. The returned handle is the hive root itself; we use it
+    // directly via root_ and clear subkey_ so setters address keys relative
+    // to the hive root.
+    HKEY appRoot = nullptr;
+    LONG ar = RegLoadAppKeyW(stagedFile_.c_str(), &appRoot,
+                             KEY_ALL_ACCESS, 0, 0);
+    if (ar != ERROR_SUCCESS) {
+        log.error(L"RegLoadAppKey also failed for " + stagedFile_.wstring() +
+                  L" (error " + std::to_wstring(ar) + L")", L"Hive");
+        return;
+    }
+    root_       = appRoot;
+    subkey_.clear();
+    appKeyMode_ = true;
+    loaded_     = true;
 }
 
 OfflineHive::~OfflineHive() {
     auto& log = util::Log::instance();
     if (loaded_) {
-        LONG r = RegUnLoadKeyW(HKEY_LOCAL_MACHINE, subkey_.c_str());
-        if (r != ERROR_SUCCESS) {
-            log.warn(L"RegUnLoadKey failed for " + subkey_ +
-                     L" (error " + std::to_wstring(r) + L")", L"Hive");
+        if (appKeyMode_) {
+            // RegCloseKey on the RegLoadAppKey handle unloads the hive and
+            // flushes pending writes to the underlying file.
+            RegCloseKey(root_);
+        } else {
+            LONG r = RegUnLoadKeyW(HKEY_LOCAL_MACHINE, subkey_.c_str());
+            if (r != ERROR_SUCCESS) {
+                log.warn(L"RegUnLoadKey failed for " + subkey_ +
+                         L" (error " + std::to_wstring(r) + L")", L"Hive");
+            }
         }
 
         // Copy the edited hive (and any regenerated log files) back into
@@ -181,9 +213,17 @@ OfflineHive::~OfflineHive() {
     }
 }
 
+// Build the subkey path for either load mode:
+//  - RegLoadKey mode: HKLM\<subkey>\<path>      → "<subkey>\\<path>"
+//  - RegLoadAppKey mode: addressed off root_    → "<path>"
+static std::wstring joinPath(const std::wstring& base, const std::wstring& path) {
+    if (base.empty()) return path;
+    return base + L"\\" + path;
+}
+
 bool OfflineHive::setDword(const std::wstring& path, const std::wstring& name, DWORD value) {
     if (!loaded_) return false;
-    HKEY h = openOrCreate(HKEY_LOCAL_MACHINE, subkey_ + L"\\" + path);
+    HKEY h = openOrCreate(root_, joinPath(subkey_, path));
     if (!h) return false;
     LONG r = RegSetValueExW(h, name.c_str(), 0, REG_DWORD,
                             reinterpret_cast<const BYTE*>(&value), sizeof(value));
@@ -194,7 +234,7 @@ bool OfflineHive::setDword(const std::wstring& path, const std::wstring& name, D
 bool OfflineHive::setString(const std::wstring& path, const std::wstring& name,
                             const std::wstring& value) {
     if (!loaded_) return false;
-    HKEY h = openOrCreate(HKEY_LOCAL_MACHINE, subkey_ + L"\\" + path);
+    HKEY h = openOrCreate(root_, joinPath(subkey_, path));
     if (!h) return false;
     LONG r = RegSetValueExW(h, name.c_str(), 0, REG_SZ,
                             reinterpret_cast<const BYTE*>(value.c_str()),
@@ -206,7 +246,7 @@ bool OfflineHive::setString(const std::wstring& path, const std::wstring& name,
 bool OfflineHive::deleteValue(const std::wstring& path, const std::wstring& name) {
     if (!loaded_) return false;
     HKEY h = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, (subkey_ + L"\\" + path).c_str(),
+    if (RegOpenKeyExW(root_, joinPath(subkey_, path).c_str(),
                       0, KEY_ALL_ACCESS, &h) != ERROR_SUCCESS) return false;
     LONG r = RegDeleteValueW(h, name.c_str());
     RegCloseKey(h);
@@ -215,8 +255,7 @@ bool OfflineHive::deleteValue(const std::wstring& path, const std::wstring& name
 
 bool OfflineHive::deleteTree(const std::wstring& path) {
     if (!loaded_) return false;
-    return RegDeleteTreeW(HKEY_LOCAL_MACHINE,
-                          (subkey_ + L"\\" + path).c_str()) == ERROR_SUCCESS;
+    return RegDeleteTreeW(root_, joinPath(subkey_, path).c_str()) == ERROR_SUCCESS;
 }
 
 } // namespace wid::core
