@@ -48,10 +48,16 @@ struct TweakContext {
     RegScript*  regScript = nullptr;  // shared accumulator (non-owning)
 };
 
-// Materialize the accumulated RegScript into <mount>\Windows\Setup\Scripts\
-// as WID-tweaks.reg + SetupComplete.cmd. Idempotent; safe to call with
-// an empty script (does nothing). Returns false on file I/O error.
-bool writeSetupCompleteFromRegScript(const TweakContext& ctx);
+// Write the accumulated RegScript into <mount>\Windows\Setup\Scripts\
+// WID-tweaks.reg. Idempotent; safe to call with an empty script
+// (returns true, writes nothing). Caller is responsible for asking
+// SetupComplete.cmd to import it (see regImportSetupCompleteLine()).
+bool writeRegScriptFile(const TweakContext& ctx);
+
+// The exact .cmd line that imports WID-tweaks.reg. Caller appends this
+// to the SetupComplete.cmd writer's extras list so a single writer
+// owns the cmd file (avoids collisions with user pre-logon commands).
+std::wstring regImportSetupCompleteLine();
 
 using TweakApplyFn = std::function<bool(const TweakContext&)>;
 

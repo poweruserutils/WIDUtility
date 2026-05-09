@@ -75,65 +75,52 @@ std::wstring RegScript::toRegFile() const {
     return std::wstring(L"Windows Registry Editor Version 5.00\r\n\r\n") + body_;
 }
 
-// Write the .reg + SetupComplete.cmd into the image. SetupComplete.cmd
-// is launched by Windows at the end of Setup (after OOBE, before first
-// logon, in SYSTEM context). We deliberately re-spawn ourselves with
-// 'start "WID Utility" cmd /k' so the user sees a visible console
-// scroll through what's happening on the just-installed system.
-bool writeSetupCompleteFromRegScript(const TweakContext& ctx) {
+// Write WID-tweaks.reg into the image. Returns true if no script content
+// (nothing to do) OR if write succeeded. The caller is responsible for
+// adding a `reg import` line to the SetupComplete.cmd writer's
+// extras list — we don't write SetupComplete.cmd ourselves to avoid
+// colliding with the user-pre-logon-commands writer in Commands.cpp.
+bool writeRegScriptFile(const TweakContext& ctx) {
     if (!ctx.regScript || ctx.regScript->empty()) return true;
 
     fs::path scriptsDir = ctx.mountDir / L"Windows" / L"Setup" / L"Scripts";
     std::error_code ec;
     fs::create_directories(scriptsDir, ec);
-    if (ec) return false;
+    if (ec) {
+        util::Log::instance().error(
+            L"create_directories failed: " + scriptsDir.wstring() +
+            L" (" + std::to_wstring(ec.value()) + L")", L"Tweaks");
+        return false;
+    }
 
     fs::path regPath = scriptsDir / L"WID-tweaks.reg";
-    fs::path cmdPath = scriptsDir / L"SetupComplete.cmd";
 
-    // Write the .reg file as UTF-16 LE with BOM (the format reg.exe
-    // expects for "Windows Registry Editor Version 5.00").
-    {
-        std::ofstream f(regPath, std::ios::binary | std::ios::trunc);
-        if (!f) return false;
-        const unsigned char bom[2] = { 0xFF, 0xFE };
-        f.write(reinterpret_cast<const char*>(bom), 2);
-        std::wstring text = ctx.regScript->toRegFile();
-        f.write(reinterpret_cast<const char*>(text.data()),
-                std::streamsize(text.size() * sizeof(wchar_t)));
+    // UTF-16 LE with BOM — the format reg.exe expects for the
+    // "Windows Registry Editor Version 5.00" header.
+    std::ofstream f(regPath, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        util::Log::instance().error(
+            L"Could not open " + regPath.wstring() + L" for write",
+            L"Tweaks");
+        return false;
     }
-
-    // Build SetupComplete.cmd. If one already exists (e.g. from a
-    // previous tweak), append to it instead of overwriting.
-    bool exists = fs::exists(cmdPath, ec);
-    std::ofstream cmd(cmdPath, std::ios::binary |
-                       (exists ? std::ios::app : std::ios::trunc));
-    if (!cmd) return false;
-    if (!exists) {
-        cmd << "@echo off\r\n";
-        cmd << "title WID Utility - applying tweaks\r\n";
-        // Re-spawn visibly so the user can see the configuration happen.
-        // %SystemRoot%\Setup\Scripts is where Setup invokes us from.
-        cmd << "if \"%WID_VISIBLE%\"==\"\" (\r\n";
-        cmd << "  set WID_VISIBLE=1\r\n";
-        cmd << "  start \"WID Utility\" /wait cmd /c \"%~f0\"\r\n";
-        cmd << "  exit /b\r\n";
-        cmd << ")\r\n";
-        cmd << "echo.\r\n";
-        cmd << "echo === WID Utility: applying tweaks ===\r\n";
-        cmd << "echo.\r\n";
-    }
-    cmd << "echo Importing WID-tweaks.reg ...\r\n";
-    cmd << "reg import \"%~dp0WID-tweaks.reg\"\r\n";
-    cmd << "if errorlevel 1 echo  (reg import returned %errorlevel%)\r\n";
-    cmd << "echo.\r\n";
-    cmd << "echo Done. This window will close in 5 seconds.\r\n";
-    cmd << "timeout /t 5 /nobreak >nul\r\n";
+    const unsigned char bom[2] = { 0xFF, 0xFE };
+    f.write(reinterpret_cast<const char*>(bom), 2);
+    std::wstring text = ctx.regScript->toRegFile();
+    f.write(reinterpret_cast<const char*>(text.data()),
+            std::streamsize(text.size() * sizeof(wchar_t)));
+    f.close();
 
     util::Log::instance().info(
-        L"Wrote " + regPath.wstring() + L" + " + cmdPath.wstring(),
+        L"Wrote " + regPath.wstring() +
+        L" (" + std::to_wstring(text.size()) + L" wchars)",
         L"Tweaks");
     return true;
+}
+
+// The exact line we want SetupComplete.cmd to run for our .reg.
+std::wstring regImportSetupCompleteLine() {
+    return L"reg import \"%~dp0WID-tweaks.reg\"";
 }
 
 namespace {

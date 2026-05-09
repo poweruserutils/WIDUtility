@@ -113,7 +113,20 @@ bool buildIso(const IsoBuildOptions& opts, const ProgressFn& progress) {
 
     auto res = util::run(po);
     if (progress) progress(L"Building ISO with oscdimg", 100);
-    return res.launched && res.finished && res.exitCode == 0;
+    bool ok = res.launched && res.finished && res.exitCode == 0;
+    if (!ok) {
+        util::Log::instance().error(
+            L"oscdimg failed (launched=" + std::wstring(res.launched ? L"1" : L"0") +
+            L", finished=" + (res.finished ? L"1" : L"0") +
+            L", exit=" + std::to_wstring(res.exitCode) +
+            L"); source=" + opts.sourceDir.wstring() +
+            L", dest=" + opts.destIso.wstring(),
+            L"Iso");
+    } else {
+        util::Log::instance().info(
+            L"oscdimg succeeded: " + opts.destIso.wstring(), L"Iso");
+    }
+    return ok;
 }
 
 } // namespace wid::core

@@ -40,7 +40,16 @@ bool runDism(std::vector<std::wstring> args, const ProgressFn& progress,
         }
     };
     auto res = util::run(po);
-    return res.launched && res.finished && res.exitCode == 0;
+    bool ok = res.launched && res.finished && res.exitCode == 0;
+    if (!ok) {
+        util::Log::instance().error(
+            stage + L": dism failed (launched=" +
+            (res.launched ? L"1" : L"0") + L", finished=" +
+            (res.finished ? L"1" : L"0") + L", exit=" +
+            std::to_wstring(res.exitCode) + L")",
+            L"Wim");
+    }
+    return ok;
 }
 
 } // namespace

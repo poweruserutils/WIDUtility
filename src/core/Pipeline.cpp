@@ -150,19 +150,19 @@ bool Pipeline::run(const PipelineProgress& progress) {
         }
         if (totalTweaks == 0) report(Stage::ApplyRegistry, L"No tweaks queued", 100);
 
-        // Flush accumulated registry tweaks into <mount>\Windows\Setup\Scripts\
-        // as a .reg + SetupComplete.cmd. Windows runs SetupComplete.cmd after
-        // OOBE and before first logon, importing the .reg with full kernel
-        // privileges (the offline-hive RegLoadKey path can't do this on
-        // modern Win11 — see buildfailfixes.md).
-        if (!regScript.empty()) {
-            if (!writeSetupCompleteFromRegScript(ctx)) {
-                log.error(L"Failed to write SetupComplete.cmd / .reg",
-                          L"Pipeline");
-            } else {
-                report(Stage::ApplyRegistry,
-                       L"Wrote SetupComplete.cmd + WID-tweaks.reg", 100);
+        // Flush the RegScript to <mount>\Windows\Setup\Scripts\WID-tweaks.reg.
+        // SetupComplete.cmd itself is written by the unified writer in stage 7
+        // — we just push a `reg import` line into its extras so one writer
+        // owns the cmd file.
+        bool haveRegScript = !regScript.empty();
+        if (haveRegScript) {
+            if (!writeRegScriptFile(ctx)) {
+                log.error(L"Failed to write WID-tweaks.reg", L"Pipeline");
+                unmountWim(m, false,
+                           stageProgress(Stage::UnmountWim, L"Discarding"));
+                return false;
             }
+            report(Stage::ApplyRegistry, L"Wrote WID-tweaks.reg", 100);
         }
 
         // Stage 5: DISM ops (component removal, features, capabilities, drivers, updates)
@@ -210,6 +210,12 @@ bool Pipeline::run(const PipelineProgress& progress) {
 
         // Stage 6: stage third-party installers
         std::vector<std::wstring> setupCompleteExtras;
+        if (haveRegScript) {
+            // Apply registry tweaks first thing in SetupComplete.cmd so app
+            // installers (later in the same script) run against a system
+            // already configured.
+            setupCompleteExtras.push_back(regImportSetupCompleteLine());
+        }
         const auto& appCat = builtinAppCatalog();
         fs::path stage = mountDir / L"Windows" / L"Setup" / L"WIDApps";
         std::error_code ec;
@@ -266,6 +272,7 @@ bool Pipeline::run(const PipelineProgress& progress) {
     }
 
     // Stage 9: trim editions
+    log.info(L"Reached post-unmount: trim + ISO build", L"Pipeline");
     if (inputs_.trimUnselected && !inputs_.keepEditionIndices.empty()) {
         fs::path trimmed = installWim.parent_path() / L"install.trimmed.wim";
         std::error_code ec;
@@ -290,12 +297,14 @@ bool Pipeline::run(const PipelineProgress& progress) {
 
     // Stage 10: build ISO
     {
+        log.info(L"Stage 10: starting oscdimg; source=" + isoDir.wstring() +
+                 L", dest=" + inputs_.outputIso.wstring(), L"Pipeline");
         IsoBuildOptions bo;
         bo.sourceDir = isoDir;
         bo.destIso   = inputs_.outputIso;
         bo.volumeLabel = L"WID_CUSTOM";
         if (!buildIso(bo, stageProgress(Stage::BuildIso, L"oscdimg"))) {
-            log.error(L"oscdimg failed", L"Pipeline");
+            log.error(L"Stage 10: oscdimg failed", L"Pipeline");
             return false;
         }
     }
