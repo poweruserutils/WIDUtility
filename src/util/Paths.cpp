@@ -104,6 +104,43 @@ fs::path currentLogFile() {
     return cached;
 }
 
+// Try to release any DISM-mounted WIM under <scratch>/mount. A previous
+// crashed run may leave one mounted, which then blocks remove_all on
+// the whole scratch dir. Best-effort: any error is ignored — if there's
+// nothing mounted, dism just exits non-zero and we move on.
+static void tryReleaseStaleMount(const fs::path& scratch) {
+    fs::path mountDir = scratch / L"mount";
+    std::error_code ec;
+    if (!fs::exists(mountDir, ec)) return;
+
+    auto dism = findDism();
+    if (!dism) return;
+
+    std::wstring cmd = L"\"" + dism->wstring() + L"\" /English /Quiet "
+                       L"/Unmount-Image /MountDir:\"" +
+                       mountDir.wstring() + L"\" /Discard";
+
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    std::wstring mut = cmd;
+    if (CreateProcessW(nullptr, mut.data(), nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        // Cap at 5 minutes; a /Discard unmount is normally fast but can
+        // be slow if the WIM is large or the system is loaded.
+        WaitForSingleObject(pi.hProcess, 300000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+}
+
+void cleanScratchRoot(const fs::path& root) {
+    std::error_code ec;
+    if (!fs::exists(root, ec)) return;
+    tryReleaseStaleMount(root);
+    fs::remove_all(root, ec);
+}
+
 void cleanOldScratchRoots() {
     auto tmp = envPath(L"TEMP").value_or(fs::temp_directory_path());
     fs::path root = tmp / L"WIDUtility";
@@ -111,8 +148,7 @@ void cleanOldScratchRoots() {
     if (!fs::exists(root, ec)) return;
     for (auto& entry : fs::directory_iterator(root, ec)) {
         if (ec) break;
-        if (entry.is_directory(ec))
-            fs::remove_all(entry.path(), ec);
+        if (entry.is_directory(ec)) cleanScratchRoot(entry.path());
     }
 }
 

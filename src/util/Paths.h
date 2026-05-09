@@ -28,7 +28,13 @@ fs::path desktopLogsDir();
 fs::path currentLogFile();
 
 // Remove every previous scratch root under %TEMP%\WIDUtility\. Safe to
-// call at startup: nothing in there is in use yet.
+// call at startup: nothing in there is in use yet. Best-effort dism
+// /Discard runs first against any stranded mount so remove_all does
+// not silently fail on a leftover mounted WIM.
 void cleanOldScratchRoots();
+
+// Remove a specific scratch root (best-effort dism /Discard first).
+// Used by Pipeline at end-of-run to free disk regardless of outcome.
+void cleanScratchRoot(const fs::path& root);
 
 } // namespace wid::util

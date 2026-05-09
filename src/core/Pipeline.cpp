@@ -42,6 +42,22 @@ bool Pipeline::run(const PipelineProgress& progress) {
     auto& log = util::Log::instance();
     log.info(L"Pipeline scratch root: " + scratch_.wstring(), L"Pipeline");
 
+    // End-of-run scratch cleanup (success OR failure). The scratch can be
+    // ~8 GB after a Win11 ISO+WIM extract, so leaving it around between
+    // runs is a quick way to fill the user's disk. cleanScratchRoot does
+    // a best-effort dism /Discard against any leftover mount before
+    // remove_all so we don't silently fail on a half-mounted state.
+    struct ScratchGuard {
+        fs::path root;
+        ~ScratchGuard() {
+            if (!root.empty()) {
+                util::Log::instance().info(
+                    L"Cleaning scratch: " + root.wstring(), L"Pipeline");
+                util::cleanScratchRoot(root);
+            }
+        }
+    } scratchGuard{ scratch_ };
+
     auto fail = [&](const std::wstring& step, const std::wstring& why) {
         log.error(step + L": " + why, L"Pipeline");
         return false;
