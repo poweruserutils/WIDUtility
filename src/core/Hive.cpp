@@ -129,16 +129,21 @@ OfflineHive::OfflineHive(const fs::path& hiveFile, const std::wstring& subkey)
                                 FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                 FILE_ATTRIBUTE_NORMAL, nullptr);
         if (fh != INVALID_HANDLE_VALUE) {
-            BYTE hdr[8] = {};
+            BYTE hdr[32] = {};
             DWORD got = 0;
             ReadFile(fh, hdr, sizeof(hdr), &got, nullptr);
             CloseHandle(fh);
-            wchar_t hex[64];
-            swprintf_s(hex,
-                       L"hive header bytes: %02X %02X %02X %02X %02X %02X %02X %02X",
-                       hdr[0], hdr[1], hdr[2], hdr[3],
-                       hdr[4], hdr[5], hdr[6], hdr[7]);
-            log.info(hex, L"Hive");
+            DWORD sig    = *reinterpret_cast<DWORD*>(&hdr[0]);
+            DWORD seq1   = *reinterpret_cast<DWORD*>(&hdr[4]);
+            DWORD seq2   = *reinterpret_cast<DWORD*>(&hdr[8]);
+            DWORD vMajor = *reinterpret_cast<DWORD*>(&hdr[20]);
+            DWORD vMinor = *reinterpret_cast<DWORD*>(&hdr[24]);
+            wchar_t buf[256];
+            swprintf_s(buf,
+                L"hive sig=0x%08X seq1=%u seq2=%u dirty=%s ver=%u.%u",
+                sig, seq1, seq2, (seq1 == seq2 ? L"no" : L"YES"),
+                vMajor, vMinor);
+            log.info(buf, L"Hive");
         }
     }
 
