@@ -117,10 +117,20 @@ OfflineHive::OfflineHive(const fs::path& hiveFile, const std::wstring& subkey)
     }
     stripReadOnly(stagedFile_);
 
-    // Intentionally do NOT copy .LOG1/.LOG2/etc.: on a freshly extracted WIM
-    // their transaction state can mismatch the primary file and put the
-    // loader into ERROR_BADDB (1009). With only the primary present, the
-    // loader treats the hive as standalone and regenerates logs as needed.
+    // Stage the log companions alongside. Modern Win11 hives need .LOG1
+    // (and sometimes .LOG2) present at load time even when the primary's
+    // sequence numbers match — the loader uses them as part of the
+    // incremental-log format. Without them RegLoadAppKey returns BADDB.
+    for (const wchar_t* ext : kHiveCompanions) {
+        fs::path src = hiveFile_;
+        src += ext;
+        if (!fs::exists(src, ec)) continue;
+        fs::path dst = stagedFile_;
+        dst += ext;
+        std::error_code cec;
+        fs::copy_file(src, dst, fs::copy_options::overwrite_existing, cec);
+        if (!cec) stripReadOnly(dst);
+    }
 
     // Diagnostic: log the first 8 bytes of the staged hive so we can verify
     // it starts with the expected "regf" signature (0x66676572).
@@ -174,8 +184,36 @@ OfflineHive::OfflineHive(const fs::path& hiveFile, const std::wstring& subkey)
     LONG ar = RegLoadAppKeyW(stagedFile_.c_str(), &appRoot,
                              KEY_ALL_ACCESS, 0, 0);
     if (ar != ERROR_SUCCESS) {
-        log.error(L"RegLoadAppKey also failed for " + stagedFile_.wstring() +
-                  L" (error " + std::to_wstring(ar) + L")", L"Hive");
+        log.warn(L"RegLoadAppKey also failed for " + stagedFile_.wstring() +
+                 L" (error " + std::to_wstring(ar) +
+                 L"); trying reg.exe load shell-out", L"Hive");
+
+        // Final fallback: shell out to reg.exe. Same underlying API but the
+        // OS tool sometimes succeeds where direct calls don't (different
+        // process token, different open share modes).
+        std::wstring cmd = L"reg.exe load \"HKLM\\" + subkey_ + L"\" \"" +
+                           stagedFile_.wstring() + L"\"";
+        STARTUPINFOW si{}; si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi{};
+        std::wstring mut = cmd;
+        DWORD exitCode = (DWORD)-1;
+        if (CreateProcessW(nullptr, mut.data(), nullptr, nullptr, FALSE,
+                           CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 30000);
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+        if (exitCode == 0) {
+            log.info(L"reg.exe load succeeded; using HKLM\\" + subkey_,
+                     L"Hive");
+            // root_ stays HKLM; subkey_ stays as-is; appKeyMode_ stays false.
+            loaded_ = true;
+            return;
+        }
+        log.error(L"reg.exe load also failed (exit=" +
+                  std::to_wstring(exitCode) + L")", L"Hive");
         return;
     }
     root_       = appRoot;
