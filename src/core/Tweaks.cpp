@@ -5,8 +5,136 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <fstream>
 
 namespace wid::core {
+
+// ---------------------------------------------------------------------------
+// RegScript
+
+namespace {
+
+std::wstring escapeRegString(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size() + 2);
+    for (wchar_t c : s) {
+        if (c == L'\\' || c == L'"') out += L'\\';
+        out += c;
+    }
+    return out;
+}
+
+std::wstring keyHeader(const std::wstring& root, const std::wstring& path) {
+    // .reg expects the long form, e.g. HKEY_LOCAL_MACHINE\Software\...
+    std::wstring full;
+    if (root == L"HKLM")      full = L"HKEY_LOCAL_MACHINE";
+    else if (root == L"HKCU") full = L"HKEY_CURRENT_USER";
+    else if (root == L"HKU")  full = L"HKEY_USERS";
+    else if (root == L"HKCR") full = L"HKEY_CLASSES_ROOT";
+    else                      full = root;
+    if (!path.empty()) {
+        full += L"\\";
+        full += path;
+    }
+    return L"[" + full + L"]\r\n";
+}
+
+} // namespace
+
+void RegScript::setDword(const std::wstring& root, const std::wstring& path,
+                         const std::wstring& name, unsigned int value) {
+    body_ += keyHeader(root, path);
+    wchar_t buf[64];
+    swprintf_s(buf, L"\"%ls\"=dword:%08x\r\n", name.c_str(), value);
+    body_ += buf;
+    body_ += L"\r\n";
+}
+
+void RegScript::setString(const std::wstring& root, const std::wstring& path,
+                          const std::wstring& name, const std::wstring& value) {
+    body_ += keyHeader(root, path);
+    body_ += L"\"" + escapeRegString(name) + L"\"=\"" +
+             escapeRegString(value) + L"\"\r\n\r\n";
+}
+
+void RegScript::deleteValue(const std::wstring& root, const std::wstring& path,
+                            const std::wstring& name) {
+    body_ += keyHeader(root, path);
+    body_ += L"\"" + escapeRegString(name) + L"\"=-\r\n\r\n";
+}
+
+void RegScript::deleteKey(const std::wstring& root, const std::wstring& path) {
+    // Leading '-' on the key header means delete-key in .reg syntax.
+    std::wstring h = keyHeader(root, path);
+    // Insert '-' right after the opening '['.
+    if (h.size() > 1) h.insert(1, L"-");
+    body_ += h + L"\r\n";
+}
+
+std::wstring RegScript::toRegFile() const {
+    return std::wstring(L"Windows Registry Editor Version 5.00\r\n\r\n") + body_;
+}
+
+// Write the .reg + SetupComplete.cmd into the image. SetupComplete.cmd
+// is launched by Windows at the end of Setup (after OOBE, before first
+// logon, in SYSTEM context). We deliberately re-spawn ourselves with
+// 'start "WID Utility" cmd /k' so the user sees a visible console
+// scroll through what's happening on the just-installed system.
+bool writeSetupCompleteFromRegScript(const TweakContext& ctx) {
+    if (!ctx.regScript || ctx.regScript->empty()) return true;
+
+    fs::path scriptsDir = ctx.mountDir / L"Windows" / L"Setup" / L"Scripts";
+    std::error_code ec;
+    fs::create_directories(scriptsDir, ec);
+    if (ec) return false;
+
+    fs::path regPath = scriptsDir / L"WID-tweaks.reg";
+    fs::path cmdPath = scriptsDir / L"SetupComplete.cmd";
+
+    // Write the .reg file as UTF-16 LE with BOM (the format reg.exe
+    // expects for "Windows Registry Editor Version 5.00").
+    {
+        std::ofstream f(regPath, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        const unsigned char bom[2] = { 0xFF, 0xFE };
+        f.write(reinterpret_cast<const char*>(bom), 2);
+        std::wstring text = ctx.regScript->toRegFile();
+        f.write(reinterpret_cast<const char*>(text.data()),
+                std::streamsize(text.size() * sizeof(wchar_t)));
+    }
+
+    // Build SetupComplete.cmd. If one already exists (e.g. from a
+    // previous tweak), append to it instead of overwriting.
+    bool exists = fs::exists(cmdPath, ec);
+    std::ofstream cmd(cmdPath, std::ios::binary |
+                       (exists ? std::ios::app : std::ios::trunc));
+    if (!cmd) return false;
+    if (!exists) {
+        cmd << "@echo off\r\n";
+        cmd << "title WID Utility - applying tweaks\r\n";
+        // Re-spawn visibly so the user can see the configuration happen.
+        // %SystemRoot%\Setup\Scripts is where Setup invokes us from.
+        cmd << "if \"%WID_VISIBLE%\"==\"\" (\r\n";
+        cmd << "  set WID_VISIBLE=1\r\n";
+        cmd << "  start \"WID Utility\" /wait cmd /c \"%~f0\"\r\n";
+        cmd << "  exit /b\r\n";
+        cmd << ")\r\n";
+        cmd << "echo.\r\n";
+        cmd << "echo === WID Utility: applying tweaks ===\r\n";
+        cmd << "echo.\r\n";
+    }
+    cmd << "echo Importing WID-tweaks.reg ...\r\n";
+    cmd << "reg import \"%~dp0WID-tweaks.reg\"\r\n";
+    cmd << "if errorlevel 1 echo  (reg import returned %errorlevel%)\r\n";
+    cmd << "echo.\r\n";
+    cmd << "echo Done. This window will close in 5 seconds.\r\n";
+    cmd << "timeout /t 5 /nobreak >nul\r\n";
+
+    util::Log::instance().info(
+        L"Wrote " + regPath.wstring() + L" + " + cmdPath.wstring(),
+        L"Tweaks");
+    return true;
+}
 
 namespace {
 
@@ -56,20 +184,22 @@ bool createStartMenuShortcut(const TweakContext& ctx,
 } // namespace
 
 bool applyUacDisable(const TweakContext& ctx) {
-    OfflineHive sw(ctx.softwareHive, kSoftwareMount);
-    if (!sw.ok()) return false;
-    const std::wstring p = L"Microsoft\\Windows\\CurrentVersion\\Policies\\System";
-    bool a = sw.setDword(p, L"EnableLUA", 0);
-    bool b = sw.setDword(p, L"ConsentPromptBehaviorAdmin", 0);
-    bool c = sw.setDword(p, L"PromptOnSecureDesktop", 0);
-    return a && b && c;
+    if (!ctx.regScript) return false;
+    const std::wstring p =
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System";
+    ctx.regScript->setDword(L"HKLM", p, L"EnableLUA",                  0);
+    ctx.regScript->setDword(L"HKLM", p, L"ConsentPromptBehaviorAdmin", 0);
+    ctx.regScript->setDword(L"HKLM", p, L"PromptOnSecureDesktop",      0);
+    return true;
 }
 
 bool applyVerboseStatus(const TweakContext& ctx) {
-    OfflineHive sw(ctx.softwareHive, kSoftwareMount);
-    if (!sw.ok()) return false;
-    return sw.setDword(L"Microsoft\\Windows\\CurrentVersion\\Policies\\System",
-                       L"VerboseStatus", 1);
+    if (!ctx.regScript) return false;
+    ctx.regScript->setDword(
+        L"HKLM",
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+        L"VerboseStatus", 1);
+    return true;
 }
 
 bool applySethcSwap(const TweakContext& ctx) {
@@ -88,21 +218,28 @@ bool applySethcSwap(const TweakContext& ctx) {
 }
 
 bool applyLabConfigBypasses(const TweakContext& ctx) {
-    OfflineHive sysH(ctx.systemHive, kSystemMount);
-    if (!sysH.ok()) return false;
-    bool a = sysH.setDword(L"Setup\\LabConfig", L"BypassTPMCheck",        1);
-    bool b = sysH.setDword(L"Setup\\LabConfig", L"BypassSecureBootCheck", 1);
-    bool c = sysH.setDword(L"Setup\\LabConfig", L"BypassRAMCheck",        1);
-    bool d = sysH.setDword(L"Setup\\LabConfig", L"BypassCPUCheck",        1);
-    bool e = sysH.setDword(L"Setup\\LabConfig", L"BypassStorageCheck",    1);
-    return a && b && c && d && e;
+    // NOTE: LabConfig is read from the *boot* WIM's SYSTEM hive *during*
+    // Setup itself, so SetupComplete.cmd is too late for it. Until we
+    // wire up boot.wim editing (separate task), this tweak emits the
+    // keys into the .reg anyway — they're harmless once on the target,
+    // and useful if the user re-runs Setup as an in-place upgrade. A
+    // proper fix needs to inject into boot.wim's SYSTEM hive offline.
+    if (!ctx.regScript) return false;
+    const std::wstring p = L"SYSTEM\\Setup\\LabConfig";
+    ctx.regScript->setDword(L"HKLM", p, L"BypassTPMCheck",        1);
+    ctx.regScript->setDword(L"HKLM", p, L"BypassSecureBootCheck", 1);
+    ctx.regScript->setDword(L"HKLM", p, L"BypassRAMCheck",        1);
+    ctx.regScript->setDword(L"HKLM", p, L"BypassCPUCheck",        1);
+    ctx.regScript->setDword(L"HKLM", p, L"BypassStorageCheck",    1);
+    return true;
 }
 
 bool applyAllowUnsupportedTpm(const TweakContext& ctx) {
-    OfflineHive sysH(ctx.systemHive, kSystemMount);
-    if (!sysH.ok()) return false;
-    return sysH.setDword(L"Setup\\MoSetup",
-                         L"AllowUpgradesWithUnsupportedTPMOrCPU", 1);
+    if (!ctx.regScript) return false;
+    ctx.regScript->setDword(
+        L"HKLM", L"SYSTEM\\Setup\\MoSetup",
+        L"AllowUpgradesWithUnsupportedTPMOrCPU", 1);
+    return true;
 }
 
 bool installRebootToUefiShortcut(const TweakContext& ctx) {

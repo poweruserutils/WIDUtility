@@ -115,11 +115,13 @@ bool Pipeline::run(const PipelineProgress& progress) {
         }
 
         // Stage 4: registry / tweak edits
+        RegScript regScript;
         TweakContext ctx{
             mountDir,
             mountDir / L"Windows" / L"System32" / L"config" / L"SOFTWARE",
             mountDir / L"Windows" / L"System32" / L"config" / L"SYSTEM",
             mountDir / L"Users"   / L"Default"  / L"NTUSER.DAT",
+            &regScript,
         };
 
         const auto& tweaks = tweakCatalog();
@@ -147,6 +149,21 @@ bool Pipeline::run(const PipelineProgress& progress) {
             }
         }
         if (totalTweaks == 0) report(Stage::ApplyRegistry, L"No tweaks queued", 100);
+
+        // Flush accumulated registry tweaks into <mount>\Windows\Setup\Scripts\
+        // as a .reg + SetupComplete.cmd. Windows runs SetupComplete.cmd after
+        // OOBE and before first logon, importing the .reg with full kernel
+        // privileges (the offline-hive RegLoadKey path can't do this on
+        // modern Win11 — see buildfailfixes.md).
+        if (!regScript.empty()) {
+            if (!writeSetupCompleteFromRegScript(ctx)) {
+                log.error(L"Failed to write SetupComplete.cmd / .reg",
+                          L"Pipeline");
+            } else {
+                report(Stage::ApplyRegistry,
+                       L"Wrote SetupComplete.cmd + WID-tweaks.reg", 100);
+            }
+        }
 
         // Stage 5: DISM ops (component removal, features, capabilities, drivers, updates)
         int dismDone = 0, dismTotal = 0;
