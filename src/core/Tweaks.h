@@ -70,6 +70,14 @@ std::wstring regImportSetupCompleteLine();
 bool applyBootWimHardwareBypass(const fs::path& isoDir,
                                 const fs::path& scratchRoot);
 
+// Delete <iso>\sources\appraiserres.dll. Setup's hardware-check loads
+// this DLL; with it gone the load fails open and checks are skipped.
+// Used in addition to the boot.wim LabConfig keys (and as the only
+// effective bypass when offline-hive editing is rejected by the OS
+// loader, as on Win11 25H2). Returns true on success or "already
+// removed"; false only on a genuine I/O failure.
+bool removeAppraiserDll(const fs::path& isoDir);
+
 using TweakApplyFn = std::function<bool(const TweakContext&)>;
 
 struct TweakEntry {

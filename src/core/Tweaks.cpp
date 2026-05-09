@@ -403,4 +403,40 @@ bool applyBootWimHardwareBypass(const fs::path& isoDir,
     return true;
 }
 
+// Delete (or zero) appraiserres.dll inside the extracted ISO. This is the
+// long-standing Rufus / win11-bypass technique: Setup loads
+// appraiserres.dll to run its hardware checks; if the load fails, Setup
+// treats it as "no checks to run" and proceeds. We delete from
+// <iso>\sources\appraiserres.dll. Works regardless of whether the
+// LabConfig hive write succeeded.
+bool removeAppraiserDll(const fs::path& isoDir) {
+    auto& log = util::Log::instance();
+    fs::path target = isoDir / L"sources" / L"appraiserres.dll";
+    std::error_code ec;
+    if (!fs::exists(target, ec)) {
+        log.warn(L"appraiserres.dll not found at " + target.wstring() +
+                 L" (already removed or unusual ISO layout)",
+                 L"AppraiserBypass");
+        return true; // not fatal
+    }
+    fs::remove(target, ec);
+    if (ec) {
+        // Some ISOs ship the file read-only; strip and retry.
+        DWORD a = GetFileAttributesW(target.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES)
+            SetFileAttributesW(target.c_str(), a & ~FILE_ATTRIBUTE_READONLY);
+        ec.clear();
+        fs::remove(target, ec);
+    }
+    if (ec) {
+        log.error(L"Could not remove " + target.wstring() +
+                  L" (" + std::to_wstring(ec.value()) + L")",
+                  L"AppraiserBypass");
+        return false;
+    }
+    log.info(L"Removed appraiserres.dll from extracted ISO sources",
+             L"AppraiserBypass");
+    return true;
+}
+
 } // namespace wid::core

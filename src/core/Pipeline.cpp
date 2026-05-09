@@ -109,15 +109,28 @@ bool Pipeline::run(const PipelineProgress& progress) {
         }
     }
     if (wantBootWimBypass) {
-        log.info(L"Step 1.5: editing boot.wim for hardware-bypass",
+        log.info(L"Step 1.5a: editing boot.wim for hardware-bypass",
                  L"Pipeline");
-        if (!applyBootWimHardwareBypass(isoDir, scratch_)) {
-            log.warn(L"Step 1.5: boot.wim bypass failed — Setup will still "
-                     L"enforce TPM/SecureBoot/RAM/CPU checks. SetupComplete "
-                     L"will retry the keys post-install for the upgrade case.",
+        bool hiveOk = applyBootWimHardwareBypass(isoDir, scratch_);
+        if (!hiveOk) {
+            log.warn(L"Step 1.5a: boot.wim hive write failed (Win11 25H2 "
+                     L"hives reject every offline loader). The "
+                     L"appraiserres.dll removal below is the actual bypass.",
                      L"Pipeline");
+        }
+
+        // Step 1.5b: remove appraiserres.dll. This is the bypass that
+        // actually works against 25H2 and doesn't depend on offline-hive
+        // editing. Run it whether or not the hive write succeeded — they
+        // are belt-and-suspenders, not either/or.
+        log.info(L"Step 1.5b: removing appraiserres.dll", L"Pipeline");
+        if (!removeAppraiserDll(isoDir)) {
+            log.warn(L"Step 1.5b: appraiserres.dll removal failed; Setup "
+                     L"may still enforce hardware checks", L"Pipeline");
         } else {
-            log.info(L"Step 1.5: ok", L"Pipeline");
+            log.info(L"Step 1.5: ok (boot.wim hive=" +
+                     std::wstring(hiveOk ? L"ok" : L"failed") +
+                     L", appraiser=removed)", L"Pipeline");
         }
     } else {
         log.info(L"Step 1.5: skipped (no hardware-bypass tweak queued)",
@@ -247,6 +260,48 @@ bool Pipeline::run(const PipelineProgress& progress) {
     }
     committed = true;
     log.info(L"Step 5/6: ok", L"Pipeline");
+
+    // ----- Step 5.5: trim unselected editions (conditional) -----------------
+    if (inputs_.trimUnselected && !inputs_.keepEditionIndices.empty()) {
+        log.info(L"Step 5.5: trimming WIM to " +
+                 std::to_wstring(inputs_.keepEditionIndices.size()) +
+                 L" edition(s)", L"Pipeline");
+
+        fs::path trimmed = installWim.parent_path() / L"install.trimmed.wim";
+        std::error_code ec;
+        fs::remove(trimmed, ec);
+
+        bool trimOk = true;
+        for (int idx : inputs_.keepEditionIndices) {
+            log.info(L"  exporting index " + std::to_wstring(idx),
+                     L"Pipeline");
+            if (!exportImage(installWim, idx, trimmed, L"max",
+                             stepProgress(Stage::TrimEditions,
+                                          L"Exporting index " +
+                                          std::to_wstring(idx), 80, 88))) {
+                log.error(L"  Export-Image failed for index " +
+                          std::to_wstring(idx), L"Pipeline");
+                trimOk = false;
+                break;
+            }
+        }
+        if (trimOk) {
+            fs::remove(installWim, ec);
+            fs::rename(trimmed, installWim, ec);
+            if (ec) {
+                return fail(L"Step 5.5",
+                            L"could not replace install.wim with trimmed copy");
+            }
+            log.info(L"Step 5.5: ok", L"Pipeline");
+        } else {
+            fs::remove(trimmed, ec);
+            log.warn(L"Step 5.5: trim failed; output ISO will contain all "
+                     L"original editions", L"Pipeline");
+        }
+    } else {
+        log.info(L"Step 5.5: skipped (no editions selected for keep, or "
+                 L"trim disabled)", L"Pipeline");
+    }
 
     // ----- Step 6: oscdimg → output ISO -------------------------------------
     log.info(L"Step 6/6: building ISO with oscdimg; source=" +
