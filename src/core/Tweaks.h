@@ -60,6 +60,16 @@ bool writeRegScriptFile(const TweakContext& ctx);
 // owns the cmd file (avoids collisions with user pre-logon commands).
 std::wstring regImportSetupCompleteLine();
 
+// Mount <iso>/sources/boot.wim index 2 (the Setup environment), inject
+// LabConfig hardware-bypass DWORDs and MoSetup\AllowUpgradesWithUnsupportedTPMOrCPU
+// into its SYSTEM hive, and commit. This is the only path that actually
+// makes Setup skip the TPM / SecureBoot / RAM / CPU checks during install
+// — the SetupComplete.cmd .reg import is too late (Setup has already
+// finished by the time it runs). Returns true on success or false with
+// the reason logged.
+bool applyBootWimHardwareBypass(const fs::path& isoDir,
+                                const fs::path& scratchRoot);
+
 using TweakApplyFn = std::function<bool(const TweakContext&)>;
 
 struct TweakEntry {

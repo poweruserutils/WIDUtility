@@ -1,6 +1,8 @@
 #include "core/Tweaks.h"
 
+#include "core/Wim.h"
 #include "util/Log.h"
+#include "util/Paths.h"
 
 #include <windows.h>
 #include <shlobj.h>
@@ -309,6 +311,96 @@ const std::vector<TweakEntry>& tweakCatalog() {
           &installRebootToBootDeviceShortcut },
     };
     return cat;
+}
+
+// ---------------------------------------------------------------------------
+// Boot WIM hardware-bypass injection
+//
+// Setup's appraiser reads HKLM\SYSTEM\Setup\LabConfig from the *boot* WIM's
+// SYSTEM hive (the one Windows PE runs against during install), not the
+// install.wim's SYSTEM hive that ships into the deployed OS. We have to
+// edit boot.wim offline. boot.wim's SYSTEM hive is small (~10 MB) and
+// simple — none of the Win11 25H2 SOFTWARE-hive loader rejection that
+// blocked us earlier today applied here in our testing.
+
+bool applyBootWimHardwareBypass(const fs::path& isoDir,
+                                const fs::path& scratchRoot) {
+    auto& log = util::Log::instance();
+    fs::path bootWim = isoDir / L"sources" / L"boot.wim";
+    if (!fs::exists(bootWim)) {
+        log.error(L"boot.wim not found at " + bootWim.wstring(),
+                  L"BootWimBypass");
+        return false;
+    }
+
+    fs::path bootMount = scratchRoot / L"bootmount";
+    std::error_code ec;
+    fs::create_directories(bootMount, ec);
+
+    // Index 2 of boot.wim is "Microsoft Windows Setup (x64)" — the image
+    // PE actually runs Setup from. Index 1 is the recovery / WinRE image
+    // and is not what enforces the appraiser.
+    constexpr int kSetupIndex = 2;
+    log.info(L"Mounting boot.wim index 2 to " + bootMount.wstring(),
+             L"BootWimBypass");
+
+    WimMount m{ bootWim, kSetupIndex, bootMount, false /* not readonly */ };
+    if (!mountWim(m, nullptr)) {
+        log.error(L"boot.wim mount failed", L"BootWimBypass");
+        return false;
+    }
+
+    bool committed = false;
+    auto unmountGuard = [&]() {
+        if (!committed) {
+            log.warn(L"Discarding boot.wim mount due to earlier failure",
+                     L"BootWimBypass");
+            unmountWim(m, false, nullptr);
+        }
+    };
+
+    fs::path systemHive =
+        bootMount / L"Windows" / L"System32" / L"config" / L"SYSTEM";
+    log.info(L"Loading boot.wim SYSTEM hive: " + systemHive.wstring(),
+             L"BootWimBypass");
+
+    {
+        OfflineHive sys(systemHive, L"WID_BOOT_SYSTEM");
+        if (!sys.ok()) {
+            log.error(L"Could not load boot.wim SYSTEM hive — appraiser "
+                      L"bypass will not be effective", L"BootWimBypass");
+            unmountGuard();
+            return false;
+        }
+
+        bool ok = true;
+        ok &= sys.setDword(L"Setup\\LabConfig", L"BypassTPMCheck",        1);
+        ok &= sys.setDword(L"Setup\\LabConfig", L"BypassSecureBootCheck", 1);
+        ok &= sys.setDword(L"Setup\\LabConfig", L"BypassRAMCheck",        1);
+        ok &= sys.setDword(L"Setup\\LabConfig", L"BypassCPUCheck",        1);
+        ok &= sys.setDword(L"Setup\\LabConfig", L"BypassStorageCheck",    1);
+        ok &= sys.setDword(L"Setup\\MoSetup",
+                           L"AllowUpgradesWithUnsupportedTPMOrCPU", 1);
+
+        if (!ok) {
+            log.error(L"One or more LabConfig writes failed",
+                      L"BootWimBypass");
+            unmountGuard();
+            return false;
+        }
+        log.info(L"LabConfig + MoSetup keys written into boot.wim SYSTEM",
+                 L"BootWimBypass");
+    } // OfflineHive dtor unloads/flushes the hive here
+
+    log.info(L"Committing boot.wim", L"BootWimBypass");
+    if (!unmountWim(m, true, nullptr)) {
+        log.error(L"boot.wim commit/unmount failed", L"BootWimBypass");
+        return false;
+    }
+    committed = true;
+    log.info(L"boot.wim hardware-bypass injection complete",
+             L"BootWimBypass");
+    return true;
 }
 
 } // namespace wid::core

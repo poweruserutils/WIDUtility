@@ -91,6 +91,39 @@ bool Pipeline::run(const PipelineProgress& progress) {
     log.info(L"Step 1/6: ok", L"Pipeline");
     if (cancel_.load()) return fail(L"Step 1", L"cancelled");
 
+    // ----- Step 1.5: boot.wim hardware-bypass (conditional) -----------------
+    // If the user queued the LabConfig bypass tweak (or the unsupported-TPM
+    // upgrade tweak), edit boot.wim's SYSTEM hive now. Setup reads
+    // LabConfig from the boot WIM during install, so injecting via the
+    // SetupComplete.cmd .reg import is too late — Setup has already run
+    // by then. Failure here logs but does not abort the build: the .reg
+    // import still runs at SetupComplete time, which at least covers the
+    // in-place-upgrade scenario (where boot.wim isn't the active appraiser).
+    bool wantBootWimBypass = false;
+    for (const auto& c : inputs_.changes) {
+        if (c.kind == ChangeKind::Tweak &&
+            (c.targetId == L"tweak.bypass.win11" ||
+             c.targetId == L"tweak.allow.unsupported.tpm")) {
+            wantBootWimBypass = true;
+            break;
+        }
+    }
+    if (wantBootWimBypass) {
+        log.info(L"Step 1.5: editing boot.wim for hardware-bypass",
+                 L"Pipeline");
+        if (!applyBootWimHardwareBypass(isoDir, scratch_)) {
+            log.warn(L"Step 1.5: boot.wim bypass failed — Setup will still "
+                     L"enforce TPM/SecureBoot/RAM/CPU checks. SetupComplete "
+                     L"will retry the keys post-install for the upgrade case.",
+                     L"Pipeline");
+        } else {
+            log.info(L"Step 1.5: ok", L"Pipeline");
+        }
+    } else {
+        log.info(L"Step 1.5: skipped (no hardware-bypass tweak queued)",
+                 L"Pipeline");
+    }
+
     // ----- Step 2: pick edition + mount -------------------------------------
     fs::path installWim = isoDir / L"sources" / L"install.wim";
     if (!fs::exists(installWim))
