@@ -157,6 +157,57 @@ OfflineHive::OfflineHive(const fs::path& hiveFile, const std::wstring& subkey)
         }
     }
 
+    // Diagnostic: walk the hbin chain. Every 4 KB page from offset 0x1000
+    // onward should start with "hbin" (0x6E696268). If any page is missing
+    // the signature, WimFsf is hiding part of the file and a custom hive
+    // editor wouldn't help either — we'd need a different extraction path.
+    {
+        HANDLE fh = CreateFileW(stagedFile_.c_str(), GENERIC_READ,
+                                FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (fh != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER fsz{};
+            GetFileSizeEx(fh, &fsz);
+            uint64_t totalPages = (fsz.QuadPart - 0x1000) / 0x1000;
+            uint64_t goodPages = 0;
+            uint64_t firstBad = UINT64_MAX;
+            uint64_t lastBad  = 0;
+            uint64_t badPages = 0;
+            const DWORD kHbinSig = 0x6E696268; // 'nibh' little-endian = "hbin"
+            for (uint64_t i = 0; i < totalPages; ++i) {
+                LARGE_INTEGER off{};
+                off.QuadPart = 0x1000 + i * 0x1000;
+                SetFilePointerEx(fh, off, nullptr, FILE_BEGIN);
+                DWORD sig = 0;
+                DWORD got = 0;
+                if (!ReadFile(fh, &sig, sizeof(sig), &got, nullptr) ||
+                    got != sizeof(sig)) {
+                    if (firstBad == UINT64_MAX) firstBad = i;
+                    lastBad = i;
+                    ++badPages;
+                    continue;
+                }
+                if (sig == kHbinSig) {
+                    ++goodPages;
+                } else {
+                    if (firstBad == UINT64_MAX) firstBad = i;
+                    lastBad = i;
+                    ++badPages;
+                }
+            }
+            CloseHandle(fh);
+            wchar_t buf[256];
+            swprintf_s(buf,
+                L"hbin walk: total=%llu good=%llu bad=%llu firstBad=%lld lastBad=%lld",
+                (unsigned long long)totalPages,
+                (unsigned long long)goodPages,
+                (unsigned long long)badPages,
+                (long long)(firstBad == UINT64_MAX ? -1 : (long long)firstBad),
+                (long long)lastBad);
+            log.info(buf, L"Hive");
+        }
+    }
+
     // Defensive: a previous crashed build may have left the subkey registered.
     RegUnLoadKeyW(HKEY_LOCAL_MACHINE, subkey_.c_str());
 
