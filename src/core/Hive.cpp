@@ -157,10 +157,12 @@ OfflineHive::OfflineHive(const fs::path& hiveFile, const std::wstring& subkey)
         }
     }
 
-    // Diagnostic: walk the hbin chain. Every 4 KB page from offset 0x1000
-    // onward should start with "hbin" (0x6E696268). If any page is missing
-    // the signature, WimFsf is hiding part of the file and a custom hive
-    // editor wouldn't help either — we'd need a different extraction path.
+    // Diagnostic: follow the hbin chain by size, not by page. Each hbin
+    // header is 32 bytes; offset 0..3 is "hbin", offset 8..11 is the
+    // hbin's total size (multiple of 4096, can span many 4 KB pages).
+    // We start at file offset 0x1000 and advance by each hbin's size
+    // until EOF. Any failure to land on a valid signature means the
+    // chain is broken — i.e. WimFsf isn't materializing the full file.
     {
         HANDLE fh = CreateFileW(stagedFile_.c_str(), GENERIC_READ,
                                 FILE_SHARE_READ, nullptr, OPEN_EXISTING,
@@ -168,43 +170,46 @@ OfflineHive::OfflineHive(const fs::path& hiveFile, const std::wstring& subkey)
         if (fh != INVALID_HANDLE_VALUE) {
             LARGE_INTEGER fsz{};
             GetFileSizeEx(fh, &fsz);
-            uint64_t totalPages = (fsz.QuadPart - 0x1000) / 0x1000;
-            uint64_t goodPages = 0;
-            uint64_t firstBad = UINT64_MAX;
-            uint64_t lastBad  = 0;
-            uint64_t badPages = 0;
-            const DWORD kHbinSig = 0x6E696268; // 'nibh' little-endian = "hbin"
-            for (uint64_t i = 0; i < totalPages; ++i) {
-                LARGE_INTEGER off{};
-                off.QuadPart = 0x1000 + i * 0x1000;
+            const DWORD kHbinSig = 0x6E696268; // "hbin" LE
+            uint64_t pos = 0x1000;
+            uint64_t hbinCount = 0;
+            uint64_t totalBytes = 0;
+            uint64_t breakAt = 0;
+            bool ok = true;
+            while ((int64_t)pos + 32 <= fsz.QuadPart) {
+                LARGE_INTEGER off{}; off.QuadPart = pos;
                 SetFilePointerEx(fh, off, nullptr, FILE_BEGIN);
-                DWORD sig = 0;
+                BYTE hdr[32]{};
                 DWORD got = 0;
-                if (!ReadFile(fh, &sig, sizeof(sig), &got, nullptr) ||
-                    got != sizeof(sig)) {
-                    if (firstBad == UINT64_MAX) firstBad = i;
-                    lastBad = i;
-                    ++badPages;
-                    continue;
+                if (!ReadFile(fh, hdr, sizeof(hdr), &got, nullptr) ||
+                    got != sizeof(hdr)) { ok = false; breakAt = pos; break; }
+                DWORD sig  = *reinterpret_cast<DWORD*>(&hdr[0]);
+                DWORD size = *reinterpret_cast<DWORD*>(&hdr[8]);
+                if (sig != kHbinSig || size < 0x1000 || (size % 0x1000) != 0) {
+                    ok = false; breakAt = pos; break;
                 }
-                if (sig == kHbinSig) {
-                    ++goodPages;
-                } else {
-                    if (firstBad == UINT64_MAX) firstBad = i;
-                    lastBad = i;
-                    ++badPages;
-                }
+                hbinCount++;
+                totalBytes += size;
+                pos += size;
             }
             CloseHandle(fh);
             wchar_t buf[256];
-            swprintf_s(buf,
-                L"hbin walk: total=%llu good=%llu bad=%llu firstBad=%lld lastBad=%lld",
-                (unsigned long long)totalPages,
-                (unsigned long long)goodPages,
-                (unsigned long long)badPages,
-                (long long)(firstBad == UINT64_MAX ? -1 : (long long)firstBad),
-                (long long)lastBad);
-            log.info(buf, L"Hive");
+            if (ok) {
+                swprintf_s(buf,
+                    L"hbin walk OK: %llu hbins, %llu bytes, ends at 0x%llX (file size 0x%llX)",
+                    (unsigned long long)hbinCount,
+                    (unsigned long long)totalBytes,
+                    (unsigned long long)pos,
+                    (unsigned long long)fsz.QuadPart);
+                log.info(buf, L"Hive");
+            } else {
+                swprintf_s(buf,
+                    L"hbin walk BROKEN at file offset 0x%llX after %llu hbins (file size 0x%llX)",
+                    (unsigned long long)breakAt,
+                    (unsigned long long)hbinCount,
+                    (unsigned long long)fsz.QuadPart);
+                log.error(buf, L"Hive");
+            }
         }
     }
 
