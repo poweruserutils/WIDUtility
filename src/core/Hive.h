@@ -31,7 +31,9 @@ public:
     bool deleteTree(const std::wstring& path);
 
 private:
-    fs::path     hiveFile_;
+    fs::path     hiveFile_;       // original path inside the WIM mount
+    fs::path     stagedFile_;     // local copy actually loaded (empty if direct)
+    fs::path     stageDir_;       // owning dir of stagedFile_ (cleaned on dtor)
     std::wstring subkey_;
     HKEY         root_   = HKEY_LOCAL_MACHINE;
     bool         loaded_ = false;
