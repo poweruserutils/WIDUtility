@@ -8,316 +8,216 @@
 
 namespace wid::core {
 
+// ---------------------------------------------------------------------------
+// Pipeline (lean rewrite, 2026-05-09)
+//
+// Six straight-line steps. Every step logs [INF] before and [INF]/[ERR]
+// after. No silent return paths: if the function returns false, the line
+// above it in the log says why. Multi-edition trim, the DISM ops queue,
+// and the unattend writer are intentionally absent — they were unused
+// surface area that hid silent failures. They can come back as separate
+// steps when a UI surfaces them.
+
+Pipeline::Pipeline(PipelineInputs inputs) : inputs_(std::move(inputs)) {}
+
 namespace {
 
-struct StageWeight { Stage stage; const wchar_t* label; int weight; };
-const StageWeight kStages[] = {
-    { Stage::ExtractIso,      L"Extracting ISO",                10 },
-    { Stage::InspectWim,      L"Inspecting WIM",                 2 },
-    { Stage::MountWim,        L"Mounting WIM",                  10 },
-    { Stage::ApplyRegistry,   L"Applying registry edits",        5 },
-    { Stage::ApplyDism,       L"Applying DISM operations",      25 },
-    { Stage::StageInstallers, L"Staging third-party installers", 5 },
-    { Stage::WriteScripts,    L"Writing setup scripts",          2 },
-    { Stage::UnmountWim,      L"Committing and unmounting WIM", 15 },
-    { Stage::TrimEditions,    L"Trimming editions",             10 },
-    { Stage::BuildIso,        L"Building ISO with oscdimg",     14 },
-    { Stage::Verify,          L"Verifying output",               2 },
-};
-
-int totalWeight() {
-    int t = 0;
-    for (auto& s : kStages) t += s.weight;
-    return t;
+// Map our flat steps to the legacy Stage enum so the GUI's progress
+// dialog (which keys off Stage) keeps working.
+void emit(const PipelineProgress& progress, Stage st,
+          const std::wstring& label, int pct, int overall) {
+    if (!progress) return;
+    StageReport r{};
+    r.stage = st;
+    r.label = label;
+    r.percent = pct;
+    r.overallPercent = overall;
+    progress(r);
 }
 
 } // namespace
-
-Pipeline::Pipeline(PipelineInputs inputs) : inputs_(std::move(inputs)) {}
 
 bool Pipeline::run(const PipelineProgress& progress) {
     scratch_ = util::createScratchRoot();
     auto& log = util::Log::instance();
     log.info(L"Pipeline scratch root: " + scratch_.wstring(), L"Pipeline");
 
-    int doneWeight = 0;
-    const int total = totalWeight();
-
-    auto report = [&](Stage stage, const std::wstring& label, int pct) {
-        if (!progress) return;
-        StageReport r{};
-        r.stage = stage;
-        r.label = label;
-        r.percent = pct;
-        // overall = (sum of completed stage weights + current stage * pct) / total
-        int cumulative = 0;
-        for (auto& s : kStages) {
-            if (s.stage == stage) {
-                cumulative += s.weight * pct / 100;
-                break;
-            }
-            cumulative += s.weight;
-        }
-        r.overallPercent = total > 0 ? (cumulative * 100 / total) : 0;
-        progress(r);
-    };
-
-    auto stageProgress = [&](Stage stage, const std::wstring& label) {
-        return [report, stage, label](std::wstring_view sub, int pct) {
-            std::wstring combined = label;
-            if (!sub.empty()) combined += L" — " + std::wstring(sub);
-            report(stage, combined, pct);
-        };
-    };
-
-    auto checkCancel = [&]() {
-        if (cancel_.load()) {
-            log.warn(L"Pipeline cancelled by user.", L"Pipeline");
-            return true;
-        }
+    auto fail = [&](const std::wstring& step, const std::wstring& why) {
+        log.error(step + L": " + why, L"Pipeline");
         return false;
     };
 
-    // Stage 1: extract ISO
+    // Per-step progress callback that just forwards to the GUI under a
+    // single Stage. Sub-percent goes 0..100 within each step.
+    auto stepProgress = [&](Stage st, const std::wstring& label,
+                            int overallStart, int overallEnd) {
+        return [&, st, label, overallStart, overallEnd]
+               (std::wstring_view sub, int pct) {
+            std::wstring combined = label;
+            if (!sub.empty()) combined += L" — " + std::wstring(sub);
+            int overall = overallStart +
+                          (overallEnd - overallStart) * pct / 100;
+            emit(progress, st, combined, pct, overall);
+        };
+    };
+
+    // ----- Step 1: extract ISO ----------------------------------------------
+    log.info(L"Step 1/6: extracting ISO " + inputs_.sourceIso.wstring(),
+             L"Pipeline");
     fs::path isoDir = util::isoExtractDir(scratch_);
     {
         IsoExtractOptions eo{ inputs_.sourceIso, isoDir };
-        if (!extractIso(eo, stageProgress(Stage::ExtractIso, L"Extracting ISO"))) {
-            log.error(L"ISO extraction failed.", L"Pipeline");
-            return false;
+        if (!extractIso(eo, stepProgress(Stage::ExtractIso,
+                                         L"Extracting ISO", 0, 15))) {
+            return fail(L"Step 1", L"extractIso returned false");
         }
     }
-    if (checkCancel()) return false;
+    log.info(L"Step 1/6: ok", L"Pipeline");
+    if (cancel_.load()) return fail(L"Step 1", L"cancelled");
 
+    // ----- Step 2: pick edition + mount -------------------------------------
     fs::path installWim = isoDir / L"sources" / L"install.wim";
-    if (!fs::exists(installWim)) installWim = isoDir / L"sources" / L"install.esd";
+    if (!fs::exists(installWim))
+        installWim = isoDir / L"sources" / L"install.esd";
+    if (!fs::exists(installWim))
+        return fail(L"Step 2", L"install.wim/esd not found in extracted ISO");
 
-    // Stage 2: inspect
-    auto editions = getWimInfo(installWim, stageProgress(Stage::InspectWim, L"Inspecting WIM"));
-    if (editions.empty()) {
-        log.error(L"No editions found in install.wim.", L"Pipeline");
-        return false;
-    }
+    log.info(L"Step 2/6: inspecting " + installWim.wstring(), L"Pipeline");
+    auto editions = getWimInfo(installWim,
+                               stepProgress(Stage::InspectWim,
+                                            L"Inspecting WIM", 15, 17));
+    if (editions.empty())
+        return fail(L"Step 2", L"no editions detected in install.wim");
 
-    std::vector<int> targets = inputs_.keepEditionIndices.empty()
-        ? [&]{ std::vector<int> v; for (auto& e : editions) v.push_back(e.index); return v; }()
-        : inputs_.keepEditionIndices;
+    int targetIdx = inputs_.keepEditionIndices.empty()
+                  ? editions.front().index
+                  : inputs_.keepEditionIndices.front();
+    log.info(L"Step 2/6: mounting edition index " +
+             std::to_wstring(targetIdx), L"Pipeline");
 
-    // For each target edition: mount → apply changes → unmount(commit).
     fs::path mountDir = util::wimMountDir(scratch_);
-    for (int idx : targets) {
-        if (checkCancel()) return false;
+    WimMount mount{ installWim, targetIdx, mountDir, true };
+    if (!mountWim(mount, stepProgress(Stage::MountWim,
+                                      L"Mounting WIM", 17, 35))) {
+        return fail(L"Step 2",
+                    L"mount failed for index " + std::to_wstring(targetIdx));
+    }
+    log.info(L"Step 2/6: ok (mounted at " + mountDir.wstring() + L")",
+             L"Pipeline");
 
-        WimMount m{ installWim, idx, mountDir, true };
-        if (!mountWim(m, stageProgress(Stage::MountWim, L"Mounting WIM"))) {
-            log.error(L"Mount failed for index " + std::to_wstring(idx), L"Pipeline");
-            return false;
+    // RAII so any early-return from here unmounts cleanly via /Discard.
+    bool committed = false;
+    auto cleanup = [&]() {
+        if (!committed) {
+            log.warn(L"Discarding mount due to earlier failure", L"Pipeline");
+            unmountWim(mount, false,
+                       stepProgress(Stage::UnmountWim, L"Discarding", 90, 95));
+        }
+    };
+
+    // ----- Step 3: apply tweaks ---------------------------------------------
+    log.info(L"Step 3/6: applying tweaks", L"Pipeline");
+    RegScript regScript;
+    TweakContext ctx{
+        mountDir,
+        mountDir / L"Windows" / L"System32" / L"config" / L"SOFTWARE",
+        mountDir / L"Windows" / L"System32" / L"config" / L"SYSTEM",
+        mountDir / L"Users"   / L"Default"  / L"NTUSER.DAT",
+        &regScript,
+    };
+
+    const auto& tweakCat = tweakCatalog();
+    int tweakTotal = 0;
+    for (const auto& c : inputs_.changes)
+        if (c.kind == ChangeKind::Tweak) ++tweakTotal;
+
+    int tweakDone = 0, tweakOk = 0, tweakFail = 0;
+    for (const auto& change : inputs_.changes) {
+        if (change.kind != ChangeKind::Tweak) continue;
+        const TweakEntry* match = nullptr;
+        for (const auto& t : tweakCat)
+            if (t.id == change.targetId) { match = &t; break; }
+        if (!match) {
+            log.warn(L"Step 3/6: unknown tweak id " + change.targetId,
+                     L"Pipeline");
+            continue;
         }
 
-        // Stage 4: registry / tweak edits
-        RegScript regScript;
-        TweakContext ctx{
-            mountDir,
-            mountDir / L"Windows" / L"System32" / L"config" / L"SOFTWARE",
-            mountDir / L"Windows" / L"System32" / L"config" / L"SYSTEM",
-            mountDir / L"Users"   / L"Default"  / L"NTUSER.DAT",
-            &regScript,
-        };
+        bool ok = match->apply ? match->apply(ctx) : false;
+        ++tweakDone;
+        (ok ? tweakOk : tweakFail)++;
+        log.info(L"  tweak: " + match->displayName +
+                 (ok ? L" -> ok" : L" -> FAILED"), L"Pipeline");
 
-        const auto& tweaks = tweakCatalog();
-        int applied = 0, totalTweaks = 0;
-        for (const auto& change : inputs_.changes) {
-            if (change.kind == ChangeKind::Tweak) ++totalTweaks;
-        }
-        for (const auto& change : inputs_.changes) {
-            if (change.kind != ChangeKind::Tweak) continue;
-            for (const auto& t : tweaks) {
-                if (t.id != change.targetId) continue;
-                bool ok = t.apply ? t.apply(ctx) : false;
-                ++applied;
-                int pct = totalTweaks ? (applied * 100 / totalTweaks) : 100;
-                report(Stage::ApplyRegistry,
-                       std::wstring(L"Tweak: ") + t.displayName +
-                       (ok ? L"" : L" (FAILED)"),
-                       pct);
-                if (!ok && !change.continueOnError) {
-                    unmountWim(m, false,
-                               stageProgress(Stage::UnmountWim, L"Discarding"));
-                    return false;
-                }
-                break;
-            }
-        }
-        if (totalTweaks == 0) report(Stage::ApplyRegistry, L"No tweaks queued", 100);
+        emit(progress, Stage::ApplyRegistry,
+             L"Tweak: " + match->displayName + (ok ? L"" : L" (FAILED)"),
+             tweakTotal ? tweakDone * 100 / tweakTotal : 100,
+             35 + (tweakTotal ? 10 * tweakDone / tweakTotal : 10));
 
-        // Flush the RegScript to <mount>\Windows\Setup\Scripts\WID-tweaks.reg.
-        // SetupComplete.cmd itself is written by the unified writer in stage 7
-        // — we just push a `reg import` line into its extras so one writer
-        // owns the cmd file.
-        bool haveRegScript = !regScript.empty();
-        if (haveRegScript) {
-            if (!writeRegScriptFile(ctx)) {
-                log.error(L"Failed to write WID-tweaks.reg", L"Pipeline");
-                unmountWim(m, false,
-                           stageProgress(Stage::UnmountWim, L"Discarding"));
-                return false;
-            }
-            report(Stage::ApplyRegistry, L"Wrote WID-tweaks.reg", 100);
-        }
-
-        // Stage 5: DISM ops (component removal, features, capabilities, drivers, updates)
-        int dismDone = 0, dismTotal = 0;
-        for (const auto& c : inputs_.changes) {
-            if (c.kind == ChangeKind::Component || c.kind == ChangeKind::Feature ||
-                c.kind == ChangeKind::Driver    || c.kind == ChangeKind::Update)
-                ++dismTotal;
-        }
-        for (const auto& c : inputs_.changes) {
-            if (checkCancel()) return false;
-            bool ok = true;
-            switch (c.kind) {
-                case ChangeKind::Component:
-                    ok = removeProvisionedAppx(mountDir, c.targetId,
-                            stageProgress(Stage::ApplyDism, L"Remove " + c.targetId));
-                    break;
-                case ChangeKind::Feature:
-                    ok = (c.action == ChangeAction::Remove)
-                        ? disableFeature(mountDir, c.targetId,
-                              stageProgress(Stage::ApplyDism, L"Disable " + c.targetId))
-                        : enableFeature(mountDir, c.targetId,
-                              stageProgress(Stage::ApplyDism, L"Enable " + c.targetId));
-                    break;
-                case ChangeKind::Driver:
-                    ok = addDriver(mountDir, c.payload,
-                            stageProgress(Stage::ApplyDism, L"Add driver " + c.targetId));
-                    break;
-                case ChangeKind::Update:
-                    ok = addPackage(mountDir, c.payload,
-                            stageProgress(Stage::ApplyDism, L"Add update " + c.targetId));
-                    break;
-                default: continue;
-            }
-            ++dismDone;
-            int pct = dismTotal ? (dismDone * 100 / dismTotal) : 100;
-            report(Stage::ApplyDism, c.description, pct);
-            if (!ok && !c.continueOnError) {
-                unmountWim(m, false,
-                           stageProgress(Stage::UnmountWim, L"Discarding"));
-                return false;
-            }
-        }
-        if (dismTotal == 0) report(Stage::ApplyDism, L"No DISM ops queued", 100);
-
-        // Stage 6: stage third-party installers
-        std::vector<std::wstring> setupCompleteExtras;
-        if (haveRegScript) {
-            // Apply registry tweaks first thing in SetupComplete.cmd so app
-            // installers (later in the same script) run against a system
-            // already configured.
-            setupCompleteExtras.push_back(regImportSetupCompleteLine());
-        }
-        const auto& appCat = builtinAppCatalog();
-        fs::path stage = mountDir / L"Windows" / L"Setup" / L"WIDApps";
-        std::error_code ec;
-        fs::create_directories(stage, ec);
-
-        int appDone = 0, appTotal = 0;
-        for (const auto& c : inputs_.changes)
-            if (c.kind == ChangeKind::Application) ++appTotal;
-        for (const auto& c : inputs_.changes) {
-            if (c.kind != ChangeKind::Application) continue;
-            const AppEntry* a = findApp(appCat, c.targetId);
-            if (!a) continue;
-            // payload may carry a local installer path; if absent, we leave a
-            // marker that requires the user to download before applying.
-            if (!c.payload.empty() && fs::exists(fs::path(c.payload), ec)) {
-                fs::path dst = stage / fs::path(c.payload).filename();
-                fs::copy_file(c.payload, dst,
-                              fs::copy_options::overwrite_existing, ec);
-                std::wstring line = L"start /wait \"\" \"%SystemDrive%\\Windows\\Setup\\WIDApps\\" +
-                                    dst.filename().wstring() + L"\" " + a->silentArgs;
-                setupCompleteExtras.push_back(line);
-            } else {
-                util::Log::instance().warn(
-                    L"App " + a->displayName +
-                    L": no local installer supplied; download manager TODO.",
-                    L"Pipeline");
-            }
-            ++appDone;
-            int pct = appTotal ? (appDone * 100 / appTotal) : 100;
-            report(Stage::StageInstallers, a->displayName, pct);
-        }
-        if (appTotal == 0) report(Stage::StageInstallers, L"No apps queued", 100);
-
-        // Stage 7: write SetupComplete.cmd / autounattend.xml
-        if (!inputs_.commands.writeSetupComplete(mountDir, setupCompleteExtras)) {
-            log.error(L"Failed to write SetupComplete.cmd", L"Pipeline");
-            unmountWim(m, false,
-                       stageProgress(Stage::UnmountWim, L"Discarding"));
-            return false;
-        }
-        UnattendOptions u = inputs_.unattend;
-        for (const auto& c : inputs_.commands.list(CommandPhase::PostLogon))
-            u.firstLogonCommands.push_back(c);
-        writeUnattendXml(isoDir / L"sources", u);
-        report(Stage::WriteScripts, L"SetupComplete.cmd + unattend written", 100);
-
-        // Stage 8: commit + unmount
-        if (!unmountWim(m, true,
-                        stageProgress(Stage::UnmountWim, L"Committing"))) {
-            log.error(L"Unmount/commit failed for index " + std::to_wstring(idx),
-                      L"Pipeline");
-            return false;
+        if (!ok && !change.continueOnError) {
+            cleanup();
+            return fail(L"Step 3",
+                        L"tweak '" + match->displayName + L"' failed");
         }
     }
+    log.info(L"Step 3/6: ok (" + std::to_wstring(tweakOk) + L" applied, " +
+             std::to_wstring(tweakFail) + L" failed-but-continued, " +
+             std::to_wstring(tweakTotal) + L" queued)", L"Pipeline");
 
-    // Stage 9: trim editions
-    log.info(L"Reached post-unmount: trim + ISO build", L"Pipeline");
-    if (inputs_.trimUnselected && !inputs_.keepEditionIndices.empty()) {
-        fs::path trimmed = installWim.parent_path() / L"install.trimmed.wim";
-        std::error_code ec;
-        fs::remove(trimmed, ec);
-        bool ok = true;
-        for (size_t i = 0; i < inputs_.keepEditionIndices.size(); ++i) {
-            int idx = inputs_.keepEditionIndices[i];
-            ok &= exportImage(installWim, idx, trimmed, L"max",
-                              stageProgress(Stage::TrimEditions,
-                                  L"Exporting index " + std::to_wstring(idx)));
-            if (!ok) break;
+    // ----- Step 4: write WID-tweaks.reg + SetupComplete.cmd -----------------
+    log.info(L"Step 4/6: writing setup scripts", L"Pipeline");
+    std::vector<std::wstring> setupExtras;
+    if (!regScript.empty()) {
+        if (!writeRegScriptFile(ctx)) {
+            cleanup();
+            return fail(L"Step 4", L"writeRegScriptFile failed");
         }
-        if (ok) {
-            fs::remove(installWim, ec);
-            fs::rename(trimmed, installWim, ec);
-        }
-        report(Stage::TrimEditions, ok ? L"Trim complete" : L"Trim failed",
-               ok ? 100 : 0);
-    } else {
-        report(Stage::TrimEditions, L"Skipped", 100);
+        setupExtras.push_back(regImportSetupCompleteLine());
     }
+    if (!inputs_.commands.writeSetupComplete(mountDir, setupExtras)) {
+        cleanup();
+        return fail(L"Step 4", L"CommandSet::writeSetupComplete failed");
+    }
+    log.info(L"Step 4/6: ok", L"Pipeline");
+    emit(progress, Stage::WriteScripts, L"Setup scripts written", 100, 50);
 
-    // Stage 10: build ISO
+    // ----- Step 5: unmount /Commit ------------------------------------------
+    log.info(L"Step 5/6: committing + unmounting WIM", L"Pipeline");
+    if (!unmountWim(mount, true,
+                    stepProgress(Stage::UnmountWim,
+                                 L"Committing WIM", 50, 80))) {
+        // unmount-with-commit failed; nothing more to do, the mount is
+        // either already cleaned up by dism or in a bad state we can't fix.
+        return fail(L"Step 5", L"unmountWim(commit) failed");
+    }
+    committed = true;
+    log.info(L"Step 5/6: ok", L"Pipeline");
+
+    // ----- Step 6: oscdimg → output ISO -------------------------------------
+    log.info(L"Step 6/6: building ISO with oscdimg; source=" +
+             isoDir.wstring() + L", dest=" + inputs_.outputIso.wstring(),
+             L"Pipeline");
     {
-        log.info(L"Stage 10: starting oscdimg; source=" + isoDir.wstring() +
-                 L", dest=" + inputs_.outputIso.wstring(), L"Pipeline");
         IsoBuildOptions bo;
-        bo.sourceDir = isoDir;
-        bo.destIso   = inputs_.outputIso;
+        bo.sourceDir   = isoDir;
+        bo.destIso     = inputs_.outputIso;
         bo.volumeLabel = L"WID_CUSTOM";
-        if (!buildIso(bo, stageProgress(Stage::BuildIso, L"oscdimg"))) {
-            log.error(L"Stage 10: oscdimg failed", L"Pipeline");
-            return false;
+        if (!buildIso(bo, stepProgress(Stage::BuildIso,
+                                       L"Building ISO", 80, 99))) {
+            return fail(L"Step 6", L"buildIso (oscdimg) failed");
         }
     }
+    log.info(L"Step 6/6: ok", L"Pipeline");
 
-    // Stage 11: verify
-    {
-        std::error_code ec;
-        auto sz = fs::file_size(inputs_.outputIso, ec);
-        report(Stage::Verify,
-               L"Output: " + std::to_wstring(sz / (1024 * 1024)) + L" MB", 100);
-    }
-
-    log.info(L"Pipeline finished: " + inputs_.outputIso.wstring(), L"Pipeline");
+    // Final size report.
+    std::error_code ec;
+    auto sz = fs::file_size(inputs_.outputIso, ec);
+    log.info(L"Pipeline finished: " + inputs_.outputIso.wstring() +
+             L" (" + std::to_wstring(sz / (1024 * 1024)) + L" MB)",
+             L"Pipeline");
+    emit(progress, Stage::Verify,
+         L"Output: " + std::to_wstring(sz / (1024 * 1024)) + L" MB",
+         100, 100);
     return true;
 }
 
