@@ -46,6 +46,7 @@ struct TweakContext {
     fs::path    systemHive;        // <mount>\Windows\System32\config\SYSTEM
     fs::path    defaultUserHive;   // <mount>\Users\Default\NTUSER.DAT
     RegScript*  regScript = nullptr;  // shared accumulator (non-owning)
+    std::vector<std::wstring>* setupCmdLines = nullptr;  // SetupComplete.cmd extras
 };
 
 // Write the accumulated RegScript into <mount>\Windows\Setup\Scripts\

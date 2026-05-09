@@ -118,12 +118,14 @@ bool Pipeline::run(const PipelineProgress& progress) {
     // ----- Step 3: apply tweaks ---------------------------------------------
     log.info(L"Step 3/6: applying tweaks", L"Pipeline");
     RegScript regScript;
+    std::vector<std::wstring> setupExtras;
     TweakContext ctx{
         mountDir,
         mountDir / L"Windows" / L"System32" / L"config" / L"SOFTWARE",
         mountDir / L"Windows" / L"System32" / L"config" / L"SYSTEM",
         mountDir / L"Users"   / L"Default"  / L"NTUSER.DAT",
         &regScript,
+        &setupExtras,
     };
 
     const auto& tweakCat = tweakCatalog();
@@ -165,14 +167,18 @@ bool Pipeline::run(const PipelineProgress& progress) {
              std::to_wstring(tweakTotal) + L" queued)", L"Pipeline");
 
     // ----- Step 4: write WID-tweaks.reg + SetupComplete.cmd -----------------
-    log.info(L"Step 4/6: writing setup scripts", L"Pipeline");
-    std::vector<std::wstring> setupExtras;
+    log.info(L"Step 4/6: writing setup scripts (" +
+             std::to_wstring(setupExtras.size()) + L" tweak cmd lines, " +
+             std::wstring(regScript.empty() ? L"no" : L"some") +
+             L" reg entries)", L"Pipeline");
     if (!regScript.empty()) {
         if (!writeRegScriptFile(ctx)) {
             cleanup();
             return fail(L"Step 4", L"writeRegScriptFile failed");
         }
-        setupExtras.push_back(regImportSetupCompleteLine());
+        // reg import runs first, before any tweak-cmd lines (so apps
+        // installed via cmd see the tweaks already applied).
+        setupExtras.insert(setupExtras.begin(), regImportSetupCompleteLine());
     }
     if (!inputs_.commands.writeSetupComplete(mountDir, setupExtras)) {
         cleanup();

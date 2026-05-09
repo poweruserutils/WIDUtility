@@ -190,18 +190,25 @@ bool applyVerboseStatus(const TweakContext& ctx) {
 }
 
 bool applySethcSwap(const TweakContext& ctx) {
-    fs::path sys32 = ctx.mountDir / L"Windows" / L"System32";
-    fs::path sethc = sys32 / L"sethc.exe";
-    fs::path cmd   = sys32 / L"cmd.exe";
-    fs::path backup = sys32 / L"sethc.exe.widbak";
-    std::error_code ec;
-    if (!fs::exists(cmd, ec) || !fs::exists(sethc, ec)) return false;
-    if (!fs::exists(backup, ec)) {
-        fs::copy_file(sethc, backup, ec);
-        if (ec) return false;
-    }
-    fs::copy_file(cmd, sethc, fs::copy_options::overwrite_existing, ec);
-    return !ec;
+    // sethc.exe inside the mounted WIM is owned by TrustedInstaller with
+    // ACLs that block direct overwrite even from an elevated process.
+    // Defer the swap to SetupComplete.cmd, which runs in SYSTEM context
+    // on the target machine where takeown + icacls work normally.
+    if (!ctx.setupCmdLines) return false;
+    auto& lines = *ctx.setupCmdLines;
+    lines.push_back(L"rem -- WID: sethc.exe -> cmd.exe swap");
+    lines.push_back(
+        L"if not exist \"%SystemRoot%\\System32\\sethc.exe.widbak\" "
+        L"copy /y \"%SystemRoot%\\System32\\sethc.exe\" "
+        L"\"%SystemRoot%\\System32\\sethc.exe.widbak\" >nul");
+    lines.push_back(L"takeown /f \"%SystemRoot%\\System32\\sethc.exe\" >nul");
+    lines.push_back(
+        L"icacls \"%SystemRoot%\\System32\\sethc.exe\" "
+        L"/grant Administrators:F >nul");
+    lines.push_back(
+        L"copy /y \"%SystemRoot%\\System32\\cmd.exe\" "
+        L"\"%SystemRoot%\\System32\\sethc.exe\"");
+    return true;
 }
 
 bool applyLabConfigBypasses(const TweakContext& ctx) {
@@ -266,7 +273,7 @@ const std::vector<TweakEntry>& tweakCatalog() {
           &applyVerboseStatus },
 
         { L"tweak.sethc.swap",
-          L"Replace sethc.exe with cmd.exe (Sticky Keys → SYSTEM cmd)",
+          L"Replace sethc.exe with cmd.exe (Sticky Keys -> SYSTEM cmd)",
           L"Press Shift x5 at the lock screen to launch a SYSTEM-level "
           L"command prompt. Classic local-privilege-escalation / password "
           L"recovery technique.",
